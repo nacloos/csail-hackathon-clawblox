@@ -6,6 +6,10 @@
 |-------|------|
 | SetControl | `{"ctrl": [n actuator values]}` |
 | Reset | `{}` |
+| SaveState (robocasa) | `{"slot": "<name>"}` |
+| RestoreState (robocasa) | `{"slot": "<name>"}` |
+| DeleteState (robocasa) | `{"slot": "<name>"}` |
+| SetArmJointPos (robocasa) | `{"qpos": [7 joint angles, rad]}` |
 
 ## API Endpoints
 
@@ -124,3 +128,42 @@ controller. If the install's controller class names don't match what the
 probe expects, the entire action vector falls under a single
 `{"part": "composite"}` entry — clients should still treat
 `action.dim` / `action.low` / `action.high` as authoritative.
+
+### Extra robocasa-only endpoints
+
+| Method / Path | Purpose |
+|---------------|---------|
+| `GET /scene` | Static obstacle map: every body with collision geoms (type/pos/quat/size/rbound). Heavy — cache it and refetch only when `scene_version` changes. |
+| `GET /body/{name}` | Convenience world pose for a single body: `{name, id, pos, quat}`. 404 if unknown. |
+| `GET /states` | List currently saved state slots: `{slots: [{name, saved_at_step, saved_wall_time}]}`. |
+| `GET /render?camera=<name>&w=<W>&h=<H>` | PNG snapshot from a named camera (defaults to `robot0_agentview_center`, 320×240, max 1024). Returns 503 if no GL backend is available — set `MUJOCO_GL=egl` (or `osmesa`) before launching. |
+| `POST /reach_check` | Body `{"target_pos": [x, y, z]}`. Returns whether the target is within Panda link-sum reach (~0.855 m) of `robot0_link0`. Heuristic only — no IK, no joint-limit check. |
+
+Every `/observe` response also carries:
+
+| Field | Meaning |
+|-------|---------|
+| `contacts` | List of active mujoco contacts this tick (`body1`, `body2`, `pos`, `dist`, `normal_force`). Non-empty when the robot is touching something. |
+| `scene_version` | Increments whenever the layout changes (Reset). Compare against your cached `/scene` to know when to refetch. |
+| `episode` | `{reward, base_distance, wall_time, step_count}` since the last Reset. Useful for "are we making progress?" heuristics. |
+
+#### Save / restore semantics
+
+`SaveState` / `RestoreState` snapshot the full mujoco physics state
+(`mjSTATE_INTEGRATION` — qpos/qvel/act/mocap/userdata/ctrl/applied
+forces) plus the wrapper's bookkeeping (`current_action`, `step_count`,
+`last_obs`, episode metrics). Restoring a slot calls `mj_forward` so
+derived kinematics (`xpos`, `xquat`) are valid before the next observe.
+
+A `Reset` between save and restore returns 409: re-randomization can
+shift body identities, and silently restoring against a different
+layout would corrupt the scene. Re-save after a Reset.
+
+#### `SetArmJointPos`
+
+Joint-space teleport for the 7 right-arm joints (`robot0_joint1..7`).
+Writes `qpos` directly and zeroes `qvel`, then `mj_forward`. Doesn't
+change `current_action` — the next `env.step` will run the OSC
+controller against whatever you last `SetControl`ed, so follow up by
+sending an OSC target that matches the new EEF (or a no-op zero).
+Useful as an escape hatch when OSC has wound the arm into a bad pose.

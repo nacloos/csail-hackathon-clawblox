@@ -114,6 +114,28 @@ def _probe_action_layout(env: Any) -> list[dict[str, Any]]:
     return layout
 
 
+def _force_arm_osc_absolute(config: dict) -> None:
+    """Switch any OSC_POSE arm controller to absolute world-frame targets.
+
+    Default OSC delta mode integrates each tick's delta into the EEF target.
+    When the target ends up beyond the arm's reach, the controller piles
+    force into the saturated joints and that force gets transferred to the
+    mobile base — the arm "drags" the base along, which makes precise
+    grasping near the reach limit impossible.
+
+    With absolute mode + world ref frame, the client sends a fixed world
+    target every tick; the controller stops integrating, force never
+    builds past what's needed to hold position, and the base stays put
+    during arm motion."""
+    body_parts = config.get("body_parts") or {}
+    for part in body_parts.values():
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") in ("OSC_POSE", "OSC_POSITION"):
+            part["input_type"] = "absolute"
+            part["input_ref_frame"] = "world"
+
+
 def make_env(
     env_name: str = DEFAULT_ENV,
     robot: str = DEFAULT_ROBOT,
@@ -137,6 +159,7 @@ def make_env(
     from robosuite.controllers import load_composite_controller_config
 
     controller_config = load_composite_controller_config(robot=robot)
+    _force_arm_osc_absolute(controller_config)
 
     env = robosuite.make(
         env_name=env_name,
