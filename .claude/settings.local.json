@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv --version)",
+      "Bash(python3 -c \"import mujoco; print\\(mujoco.__version__\\)\")",
+      "Read(//home/dadur/.local/bin/**)",
+      "Bash(command -v uv)",
+      "Bash(curl -s http://127.0.0.1:8765/health)",
+      "Bash(curl -s http://127.0.0.1:8765/state)",
+      "Bash(python3 -c ' *)",
+      "Bash(curl -v --max-time 3 http://127.0.0.1:8765/health)",
+      "Bash(uv run --with mujoco python -c ' *)",
+      "Bash(curl -s --max-time 3 http://127.0.0.1:8765/health)",
+      "Bash(curl -s http://127.0.0.1:8765/state echo \"--- top-level keys ---\" python3 -c \"import json; s=json.load\\(open\\('/tmp/state.json'\\)\\); print\\(sorted\\(s.keys\\(\\)\\)\\)\" echo echo \"--- which controller is the user actually running? ---\" ps -ef)",
+      "Bash(python3 -c \"import sys,json; s=json.load\\(sys.stdin\\); print\\('grasping:',s.get\\('ee_grasping_block'\\)\\); [print\\(n, [round\\(x,3\\) for x in b['pos']]\\) for n,b in s['blocks'].items\\(\\)]\")",
+      "Bash(curl -s http://127.0.0.1:8765/info)",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3 -c \"import sys,json; s=json.load\\(sys.stdin\\); print\\(list\\(s.keys\\(\\)\\)\\); print\\(json.dumps\\(s.get\\('end_effector'\\) or s.get\\('pinch'\\) or {}, indent=2\\)[:300]\\)\")",
+      "Bash(python3 -c \"import sys,json; s=json.load\\(sys.stdin\\); print\\('grasping:',s.get\\('ee_grasping_block'\\)\\); [print\\(n, [round\\(x,3\\) for x in b['pos']]\\) for n,b in s['blocks'].items\\(\\)]; print\\('ee:', [round\\(x,3\\) for x in s['ee_pos']]\\)\")",
+      "Bash(python3 *)",
+      "Bash(curl -s -X POST -H \"Content-Type: application/json\" -d '{}' http://127.0.0.1:8765/reset)",
+      "WebFetch(domain:robocasa.ai)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:robosuite.ai)",
+      "Bash(git checkout *)",
+      "Bash(python *)",
+      "Bash(uv run *)",
+      "Bash(curl -s http://127.0.0.1:8080/observe)",
+      "Bash(curl -sf http://127.0.0.1:8080/spec)",
+      "Bash(chmod +x /home/dadur/Workspace/csail-hackathon-clawblox/install.sh)"
+    ]
+  }
+}
