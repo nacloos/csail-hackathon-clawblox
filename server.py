@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import argparse
 from contextlib import asynccontextmanager
 from pathlib import Path
 import threading
 import time
+from uuid import uuid4
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 import mujoco
@@ -27,6 +29,15 @@ class InputAction(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class Session:
+    def __init__(self, name: str, session_id: str | None = None) -> None:
+        self.name = name
+        self.session_id = session_id or str(uuid4())
+        self.agent_id = str(uuid4())
+        self.created_at = time.time()
+        self.last_seen = self.created_at
+
+
 class SimState:
     def __init__(self, scene: Path) -> None:
         self.model = mujoco.MjModel.from_xml_path(str(scene))
@@ -42,6 +53,7 @@ class SimState:
             for body_id, name in enumerate(self.body_names)
             if name.startswith(("block_", "brick_", "plank_", "pillar_"))
         ]
+        self.sessions: dict[str, Session] = {}
         self.reset()
 
     def start(self) -> None:
@@ -95,6 +107,47 @@ class SimState:
             "blocks": objects,
         }
 
+    def join(self, name: str, existing_session_id: str | None = None) -> dict[str, Any]:
+        with self.lock:
+            if existing_session_id and existing_session_id in self.sessions:
+                session = self.sessions[existing_session_id]
+                session.name = name
+                session.last_seen = time.time()
+            else:
+                session = Session(name, existing_session_id)
+                self.sessions[session.session_id] = session
+            return {
+                "session": session.session_id,
+                "agent_id": session.agent_id,
+                "name": session.name,
+            }
+
+    def leave(self, session_id: str | None) -> dict[str, Any]:
+        if not session_id:
+            return {"ok": True}
+        with self.lock:
+            self.sessions.pop(session_id, None)
+            return {"ok": True}
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "time": float(self.data.time),
+                "qpos": self.data.qpos.tolist(),
+                "qvel": self.data.qvel.tolist(),
+                "ctrl": self.data.ctrl.tolist(),
+                "sessions": [
+                    {
+                        "session": session.session_id,
+                        "agent_id": session.agent_id,
+                        "name": session.name,
+                        "created_at": session.created_at,
+                        "last_seen": session.last_seen,
+                    }
+                    for session in self.sessions.values()
+                ],
+            }
+
     def objects_locked(self) -> list[dict[str, Any]]:
         return [
             {
@@ -145,6 +198,14 @@ def create_app(sim: SimState, manage_sim: bool = True) -> FastAPI:
 
     app = FastAPI(title="MuJoCo Panda API", lifespan=lifespan if manage_sim else noop_lifespan)
 
+    @app.post("/join")
+    def join(name: str = "agent", x_session: str | None = Header(default=None)) -> dict[str, Any]:
+        return sim.join(name, x_session)
+
+    @app.post("/leave")
+    def leave(x_session: str | None = Header(default=None)) -> dict[str, Any]:
+        return sim.leave(x_session)
+
     @app.get("/observe")
     def observe() -> dict[str, Any]:
         return sim.observe()
@@ -166,6 +227,14 @@ def create_app(sim: SimState, manage_sim: bool = True) -> FastAPI:
     def api_doc() -> str:
         return API_DOC.read_text()
 
+    @app.get("/skill.md", response_class=PlainTextResponse)
+    def skill_doc() -> str:
+        return API_DOC.read_text()
+
+    @app.get("/snapshot")
+    def snapshot() -> dict[str, Any]:
+        return sim.snapshot()
+
     return app
 
 
@@ -174,7 +243,11 @@ app = create_app(sim)
 
 
 def main() -> None:
-    uvicorn.run(app, host=DEFAULT_HOST, port=DEFAULT_PORT)
+    parser = argparse.ArgumentParser(description="Run the MuJoCo Panda API server.")
+    parser.add_argument("--host", default=DEFAULT_HOST)
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    args = parser.parse_args()
+    uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

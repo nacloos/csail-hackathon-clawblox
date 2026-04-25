@@ -1,10 +1,11 @@
 # Franka Panda MuJoCo Sandbox
 
-Tiny MuJoCo setup for a Franka Emika Panda arm manipulating a cube.
+Tiny MuJoCo setup for a Franka Emika Panda arm manipulating construction
+objects.
 
 The Panda model is vendored from DeepMind's MuJoCo Menagerie in
 `models/franka_emika_panda`. The custom scene in `models/panda_cube/scene.xml`
-adds a table, cube, lighting, and camera around that robot.
+adds blocks, bricks, planks, pillars, lighting, and camera around that robot.
 
 ## Run
 
@@ -14,8 +15,8 @@ Standalone viewer only:
 DISPLAY=:0 uv run --with mujoco python run_viewer.py
 ```
 
-If the viewer opens, you should see the Panda arm in its home pose with a red
-cube on the table. The MuJoCo viewer control panel can edit the actuator
+If the viewer opens, you should see the Panda arm in its home pose with objects
+placed around the robot. The MuJoCo viewer control panel can edit the actuator
 controls directly.
 
 ## Agent API
@@ -49,4 +50,18 @@ For headless rendering/debugging on WSL:
 
 ```bash
 MUJOCO_GL=egl uv run --with mujoco python smoke_test.py
+```
+
+## Claude Agent
+
+Run one simulator world with one Claude agent and an attached viewer:
+
+```bash
+bash agent/launch_multi_claude.sh --world-dir worlds/mujoco-panda --base-port 8085 --tmux-session mujoco-panda-agent --run-id mujoco-panda-test --model claude-opus-4-7 --sandbox --world-server-cmd 'DISPLAY=:0 uv run --with mujoco --with fastapi --with uvicorn python run_with_viewer.py'
+```
+
+Attach to the tmux session:
+
+```bash
+tmux attach -t mujoco-panda-agent
 ```
