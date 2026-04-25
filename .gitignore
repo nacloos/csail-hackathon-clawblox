@@ -2,4 +2,22 @@ __pycache__/
 .venv/
 *.pyc
 MUJOCO_LOG.TXT
+.env
+.env.*
+!.env.example
+runs/
+
+# OS / editor
+**/.DS_Store
+.claude/
+
+# reference imagery + scratch experiments
+refs/
+videos/
+assets/decart-*
+assets/Gen-4*
+assets/*styled*
+assets/pink.png
+assets/robo.png
+assets/robo.mov
 
