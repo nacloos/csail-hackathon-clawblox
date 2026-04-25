@@ -4,6 +4,8 @@ import time
 import mujoco
 import mujoco.viewer
 
+from panda_setup import set_panda_home
+
 
 ROOT = Path(__file__).resolve().parent
 SCENE = ROOT / "models" / "panda_cube" / "scene.xml"
@@ -12,18 +14,12 @@ SCENE = ROOT / "models" / "panda_cube" / "scene.xml"
 def main() -> None:
     model = mujoco.MjModel.from_xml_path(str(SCENE))
     data = mujoco.MjData(model)
-
-    home_key = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "home")
-    if home_key >= 0:
-        mujoco.mj_resetDataKeyframe(model, data, home_key)
+    set_panda_home(model, data)
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
         while viewer.is_running():
-            # The Panda actuators are position-like servos. Holding ctrl at the
-            # keyframe values keeps the robot stable while the cube remains free.
-            if home_key >= 0:
-                data.ctrl[:] = model.key_ctrl[home_key]
-
+            # The viewer control panel edits data.ctrl directly. Do not overwrite
+            # it here, or the sliders will appear to do nothing.
             mujoco.mj_step(model, data)
             viewer.sync()
             time.sleep(model.opt.timestep)
@@ -31,4 +27,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

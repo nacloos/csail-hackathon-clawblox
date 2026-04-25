@@ -3,6 +3,8 @@ import os
 
 import mujoco
 
+from panda_setup import set_panda_home
+
 
 ROOT = Path(__file__).resolve().parent
 SCENE = ROOT / "models" / "panda_cube" / "scene.xml"
@@ -11,11 +13,7 @@ SCENE = ROOT / "models" / "panda_cube" / "scene.xml"
 def main() -> None:
     model = mujoco.MjModel.from_xml_path(str(SCENE))
     data = mujoco.MjData(model)
-
-    home_key = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "home")
-    if home_key >= 0:
-        mujoco.mj_resetDataKeyframe(model, data, home_key)
-        data.ctrl[:] = model.key_ctrl[home_key]
+    set_panda_home(model, data)
 
     renderer = mujoco.Renderer(model, height=240, width=320)
     for _ in range(50):
