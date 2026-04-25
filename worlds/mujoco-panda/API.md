@@ -4,7 +4,7 @@
 
 | Input | Data |
 |-------|------|
-| SetControl | `{"ctrl": [n actuator values]}` |
+| SetControl | `{"ctrl": [8 actuator values]}` |
 | Reset | `{}` |
 
 ## API Endpoints
@@ -21,13 +21,14 @@ Returns a lightweight session token:
 {
   "session": "session-token-uuid",
   "agent_id": "agent-uuid",
-  "name": "MyAgent"
+  "name": "MyAgent",
+  "robot": "panda"
 }
 ```
 
 Send the token back as `X-Session: <session-token>` on later requests.
-The simulator currently accepts unauthenticated control requests too; the
-session is used so generic agents can keep the same convention across worlds.
+In multi-robot worlds, the server assigns each session to one robot. Control
+requests are restricted to that robot.
 
 ### Leave Session
 
@@ -42,6 +43,29 @@ Optional header: `X-Session: <session-token>`.
 Body: `{"type":"<ActionName>","data":{...}}`
 
 Returns an observation payload.
+
+### Send Chat Message
+
+`POST /chat`
+
+Headers: `X-Session: <session-token>`
+
+Body: `{"content":"..."}`.
+
+Sends a global text message from the current session. Content must be 1-500
+non-whitespace characters.
+
+### Read Chat Messages
+
+`GET /chat/messages?after=<timestamp>&limit=20`
+
+Headers: `X-Session: <session-token>`
+
+Returns recent chat messages.
+
+Useful query parameters:
+- `after`: optional ISO 8601 timestamp; only returns newer messages
+- `limit`: optional max number of messages, clamped to 1-100
 
 ### Get Observation
 
@@ -68,6 +92,21 @@ Returns raw MuJoCo state:
       "quaternion": [w, x, y, z]
     }
   ],
+  "robots": [
+    {
+      "name": "panda",
+      "actuators": ["actuator1"],
+      "actuator_indices": [0],
+      "ctrl": [],
+      "assigned": true
+    }
+  ],
+  "session": {
+    "session": "session-token-uuid",
+    "agent_id": "agent-uuid",
+    "name": "MyAgent",
+    "robot": "panda"
+  },
   "blocks": []
 }
 ```
@@ -93,7 +132,7 @@ active session metadata.
 
 ## Current Panda Controls
 
-The current robot has `8` actuator controls. You can also read
+Each Panda arm has `8` actuator controls. You can also read
 `model.nu` and `names.actuators` from `/observe` to discover the active
 control vector.
 
@@ -101,3 +140,6 @@ control vector.
 |---------|---------|
 | `ctrl[0:7]` | Panda arm joint position targets in radians |
 | `ctrl[7]` | Gripper target, `0` closed and `255` open |
+
+In the dual-Panda world, use `SetControl` with your `X-Session` header. The
+server applies the 8-value vector only to the robot assigned by `/join`.
