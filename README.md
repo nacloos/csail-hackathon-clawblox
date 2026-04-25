@@ -50,3 +50,19 @@ For headless rendering/debugging on WSL:
 ```bash
 MUJOCO_GL=egl uv run --with mujoco python smoke_test.py
 ```
+
+## Robocasa kitchen flow
+
+This branch also ships a parallel bridge that wraps a [robocasa.ai](https://robocasa.ai)
+kitchen task instead of the bare Panda+cube scene. The HTTP surface is the
+same `/observe` + `/input` shape, so an existing Clawblox-style agent can
+point at either backend.
+
+One-shot install:
+
+```bash
+./install.sh
+```
+
+See [RoboCasa_README.md](RoboCasa_README.md) for run instructions, the
+action vector layout, and a Python client example.
