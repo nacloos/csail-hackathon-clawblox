@@ -1074,6 +1074,8 @@ fi
 if [[ -z "${SYSTEM_PROMPT_TEMPLATE:-}" ]]; then
   if [[ -f "$WORLD_ABS_DIR/system_prompt.md" ]]; then
     SYSTEM_PROMPT_TEMPLATE="$WORLD_ABS_DIR/system_prompt.md"
+  elif [[ -f "$ROOT_DIR/worlds/mujoco-panda/system_prompt.md" ]]; then
+    SYSTEM_PROMPT_TEMPLATE="$ROOT_DIR/worlds/mujoco-panda/system_prompt.md"
   elif [[ -f "$TEMPLATE_ABS_DIR/system_prompt.md" ]]; then
     SYSTEM_PROMPT_TEMPLATE="$TEMPLATE_ABS_DIR/system_prompt.md"
   else

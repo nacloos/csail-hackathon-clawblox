@@ -4,13 +4,13 @@ set -euo pipefail
 input="$(cat)"
 mapfile -t parsed_fields < <(
   INPUT_JSON="$input" node <<'EOF'
-const data = JSON.parse(process.env.INPUT_JSON ?? "{}");
+const data = JSON.parse(process.env.INPUT_JSON || "{}");
 const fields = [
-  data.session_id ?? "",
-  data.transcript_path ?? "",
-  data.cwd ?? "",
-  data.source ?? "",
-  data.model ?? "",
+  data.session_id || "",
+  data.transcript_path || "",
+  data.cwd || "",
+  data.source || "",
+  data.model || "",
 ];
 for (const value of fields) process.stdout.write(String(value) + "\n");
 EOF
@@ -63,11 +63,11 @@ const payload = {
     hookEventName: "SessionStart",
     additionalContext:
       "Runtime session metadata:\n" +
-      `- session_id: ${process.env.INPUT_SESSION_ID ?? ""}\n` +
-      `- transcript_path: ${process.env.INPUT_TRANSCRIPT_PATH ?? ""}\n` +
-      `- cwd: ${process.env.INPUT_CWD_PATH ?? ""}\n` +
-      `- source: ${process.env.INPUT_SOURCE_KIND ?? ""}\n` +
-      `- model: ${process.env.INPUT_MODEL_NAME ?? ""}`,
+      `- session_id: ${process.env.INPUT_SESSION_ID || ""}\n` +
+      `- transcript_path: ${process.env.INPUT_TRANSCRIPT_PATH || ""}\n` +
+      `- cwd: ${process.env.INPUT_CWD_PATH || ""}\n` +
+      `- source: ${process.env.INPUT_SOURCE_KIND || ""}\n` +
+      `- model: ${process.env.INPUT_MODEL_NAME || ""}`,
   },
 };
 process.stdout.write(JSON.stringify(payload));

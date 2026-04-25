@@ -5,10 +5,10 @@ input="$(cat)"
 log_dir="${CLAWBLOX_CLAUDE_LOG_DIR:-}"
 mapfile -t parsed_fields < <(
   INPUT_JSON="$input" node <<'EOF'
-const data = JSON.parse(process.env.INPUT_JSON ?? "{}");
+const data = JSON.parse(process.env.INPUT_JSON || "{}");
 const fields = [
-  data.session_id ?? "",
-  data.notification_type ?? "",
+  data.session_id || "",
+  data.notification_type || "",
 ];
 for (const value of fields) process.stdout.write(String(value) + "\n");
 EOF

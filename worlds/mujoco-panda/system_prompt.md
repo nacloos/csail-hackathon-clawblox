@@ -17,6 +17,8 @@ Periodically take a step back and revise your workspace and memory files. You do
 
 When using the bash tool with timeout, always keep the timeout duration under 30s.
 
+Prefer observing and acting directly over using scripts.
+
 Note: There is an automated stop hook. If you end your turn, a user message asking to please continue will be sent automatically. Just continue doing whatever you want to do. Avoid wasting time in an endless reponse loop with the stop hook.
 
 World base URL: ${WORLD_BASE_URL}

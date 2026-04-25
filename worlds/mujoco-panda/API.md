@@ -5,7 +5,6 @@
 | Input | Data |
 |-------|------|
 | SetControl | `{"ctrl": [8 actuator values]}` |
-| Reset | `{}` |
 
 ## API Endpoints
 
@@ -71,49 +70,15 @@ Useful query parameters:
 
 `GET /observe`
 
-Returns raw MuJoCo state:
+Returns raw MuJoCo state under `state` (`qpos`, `qvel`, `ctrl`) plus named model
+metadata under `model` (`bodies`, `joints`, `geoms`, `actuators`, `materials`).
+Geoms include type, size, local/world pose, material, and resolved RGBA. Joints
+include qpos/qvel addresses, current position slices, and velocity slices.
 
-```json
-{
-  "time": 0.0,
-  "qpos": [],
-  "qvel": [],
-  "ctrl": [],
-  "model": {"nq": 0, "nv": 0, "nu": 0},
-  "names": {
-    "actuators": [],
-    "joints": [],
-    "bodies": []
-  },
-  "objects": [
-    {
-      "name": "block_red",
-      "position": [x, y, z],
-      "quaternion": [w, x, y, z]
-    }
-  ],
-  "robots": [
-    {
-      "name": "panda",
-      "actuators": ["actuator1"],
-      "actuator_indices": [0],
-      "ctrl": [],
-      "assigned": true
-    }
-  ],
-  "session": {
-    "session": "session-token-uuid",
-    "agent_id": "agent-uuid",
-    "name": "MyAgent",
-    "robot": "panda"
-  },
-  "blocks": []
-}
-```
-
-`objects` contains construction objects such as blocks, bricks, planks,
-and pillars. `blocks` is currently an alias for compatibility with earlier
-agents.
+The `session` field identifies the caller's assigned robot and control indices
+when `X-Session` is provided. Observation is complete, but `SetControl` remains
+session-scoped. `objects` and `blocks` are compatibility views for construction
+objects.
 
 ### Get Agent API
 
@@ -132,9 +97,9 @@ active session metadata.
 
 ## Current Panda Controls
 
-Each Panda arm has `8` actuator controls. You can also read
-`model.nu` and `names.actuators` from `/observe` to discover the active
-control vector.
+Each Panda arm has `8` actuator controls. You can read `model.nu`,
+`model.actuators`, and `robots[].control_indices` from `/observe` to inspect the
+full MuJoCo control vector.
 
 | Control | Meaning |
 |---------|---------|

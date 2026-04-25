@@ -8,7 +8,6 @@ This world runs one shared MuJoCo server with two Panda arms, `left` and
 | Input | Data |
 |-------|------|
 | SetControl | `{"ctrl": [8 actuator values]}` |
-| Reset | `{}` |
 
 ## Session Ownership
 
@@ -17,6 +16,21 @@ Join with `POST /join?name=MyAgent`. The response includes your assigned
 
 Agents may only control their assigned robot. `SetControl` applies the 8-value
 control vector to the caller's robot, as identified by the `X-Session` header.
+
+## Observation
+
+`GET /observe`
+
+Headers: optional `X-Session: <session-token>`.
+
+Returns raw MuJoCo state under `state` (`qpos`, `qvel`, `ctrl`) plus named model
+metadata under `model` (`bodies`, `joints`, `geoms`, `actuators`, `materials`).
+Geoms include type, size, local/world pose, material, and resolved RGBA. Joints
+include qpos/qvel addresses, current position slices, and velocity slices.
+
+The `session` field identifies the caller's assigned robot and control indices
+when `X-Session` is provided. Observation is complete, but `SetControl` remains
+session-scoped and accepts only the 8 controls for the caller's robot.
 
 ## Chat
 

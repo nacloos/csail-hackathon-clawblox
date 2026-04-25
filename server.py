@@ -28,6 +28,37 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8080
 DEFAULT_RECORD_DIR = ROOT / "recordings"
 
+GEOM_TYPES = {
+    int(mujoco.mjtGeom.mjGEOM_PLANE): "plane",
+    int(mujoco.mjtGeom.mjGEOM_HFIELD): "hfield",
+    int(mujoco.mjtGeom.mjGEOM_SPHERE): "sphere",
+    int(mujoco.mjtGeom.mjGEOM_CAPSULE): "capsule",
+    int(mujoco.mjtGeom.mjGEOM_ELLIPSOID): "ellipsoid",
+    int(mujoco.mjtGeom.mjGEOM_CYLINDER): "cylinder",
+    int(mujoco.mjtGeom.mjGEOM_BOX): "box",
+    int(mujoco.mjtGeom.mjGEOM_MESH): "mesh",
+    int(mujoco.mjtGeom.mjGEOM_SDF): "sdf",
+}
+
+JOINT_TYPES = {
+    int(mujoco.mjtJoint.mjJNT_FREE): "free",
+    int(mujoco.mjtJoint.mjJNT_BALL): "ball",
+    int(mujoco.mjtJoint.mjJNT_SLIDE): "slide",
+    int(mujoco.mjtJoint.mjJNT_HINGE): "hinge",
+}
+
+JOINT_QPOS_WIDTHS = {"free": 7, "ball": 4, "slide": 1, "hinge": 1}
+JOINT_QVEL_WIDTHS = {"free": 6, "ball": 3, "slide": 1, "hinge": 1}
+
+ACTUATOR_TRANSMISSION_TYPES = {
+    int(mujoco.mjtTrn.mjTRN_JOINT): "joint",
+    int(mujoco.mjtTrn.mjTRN_JOINTINPARENT): "jointinparent",
+    int(mujoco.mjtTrn.mjTRN_SLIDERCRANK): "slidercrank",
+    int(mujoco.mjtTrn.mjTRN_TENDON): "tendon",
+    int(mujoco.mjtTrn.mjTRN_SITE): "site",
+    int(mujoco.mjtTrn.mjTRN_BODY): "body",
+}
+
 
 class InputAction(BaseModel):
     type: str
@@ -148,19 +179,12 @@ class SimState:
         session = self.sessions.get(session_id or "")
         return {
             "time": float(self.data.time),
-            "qpos": self.data.qpos.tolist(),
-            "qvel": self.data.qvel.tolist(),
-            "ctrl": self.data.ctrl.tolist(),
-            "model": {
-                "nq": int(self.model.nq),
-                "nv": int(self.model.nv),
-                "nu": int(self.model.nu),
+            "state": {
+                "qpos": self.data.qpos.tolist(),
+                "qvel": self.data.qvel.tolist(),
+                "ctrl": self.data.ctrl.tolist(),
             },
-            "names": {
-                "actuators": self.actuator_names,
-                "joints": self.joint_names,
-                "bodies": self.body_names,
-            },
+            "model": self.model_payload_locked(),
             "objects": objects,
             "blocks": objects,
             "robots": self.robots_locked(),
@@ -274,6 +298,119 @@ class SimState:
             for body_id in self.object_body_ids
         ]
 
+    def model_payload_locked(self) -> dict[str, Any]:
+        bodies = []
+        for body_id, name in enumerate(self.body_names):
+            geom_start = int(self.model.body_geomadr[body_id])
+            geom_count = int(self.model.body_geomnum[body_id])
+            joint_start = int(self.model.body_jntadr[body_id])
+            joint_count = int(self.model.body_jntnum[body_id])
+            parent_id = int(self.model.body_parentid[body_id])
+            bodies.append(
+                {
+                    "id": body_id,
+                    "name": name,
+                    "parent_id": parent_id if body_id != 0 else None,
+                    "parent_name": self.body_names[parent_id] if body_id != 0 else None,
+                    "position": self.data.xpos[body_id].tolist(),
+                    "quaternion": self.data.xquat[body_id].tolist(),
+                    "geom_ids": list(range(geom_start, geom_start + geom_count)),
+                    "joint_ids": list(range(joint_start, joint_start + joint_count)),
+                }
+            )
+
+        joints = []
+        for joint_id, name in enumerate(self.joint_names):
+            joint_type = JOINT_TYPES.get(int(self.model.jnt_type[joint_id]), str(int(self.model.jnt_type[joint_id])))
+            qpos_address = int(self.model.jnt_qposadr[joint_id])
+            qvel_address = int(self.model.jnt_dofadr[joint_id])
+            qpos_width = JOINT_QPOS_WIDTHS.get(joint_type, 1)
+            qvel_width = JOINT_QVEL_WIDTHS.get(joint_type, 1)
+            body_id = int(self.model.jnt_bodyid[joint_id])
+            joints.append(
+                {
+                    "id": joint_id,
+                    "name": name,
+                    "type": joint_type,
+                    "body_id": body_id,
+                    "body_name": self.body_names[body_id],
+                    "qpos_address": qpos_address,
+                    "qvel_address": qvel_address,
+                    "qpos_width": qpos_width,
+                    "qvel_width": qvel_width,
+                    "position": self.data.qpos[qpos_address : qpos_address + qpos_width].tolist(),
+                    "velocity": self.data.qvel[qvel_address : qvel_address + qvel_width].tolist(),
+                    "range": self.model.jnt_range[joint_id].tolist(),
+                }
+            )
+
+        materials = []
+        material_names = self._names(mujoco.mjtObj.mjOBJ_MATERIAL, self.model.nmat)
+        for material_id, name in enumerate(material_names):
+            materials.append(
+                {
+                    "id": material_id,
+                    "name": name,
+                    "rgba": self.model.mat_rgba[material_id].tolist(),
+                }
+            )
+
+        geoms = []
+        for geom_id in range(self.model.ngeom):
+            body_id = int(self.model.geom_bodyid[geom_id])
+            material_id = int(self.model.geom_matid[geom_id])
+            geoms.append(
+                {
+                    "id": geom_id,
+                    "name": mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or f"geom_{geom_id}",
+                    "body_id": body_id,
+                    "body_name": self.body_names[body_id],
+                    "type": GEOM_TYPES.get(int(self.model.geom_type[geom_id]), str(int(self.model.geom_type[geom_id]))),
+                    "size": self.model.geom_size[geom_id].tolist(),
+                    "local_position": self.model.geom_pos[geom_id].tolist(),
+                    "local_quaternion": self.model.geom_quat[geom_id].tolist(),
+                    "world_position": self.data.geom_xpos[geom_id].tolist(),
+                    "world_xmat": self.data.geom_xmat[geom_id].reshape(3, 3).tolist(),
+                    "material_id": material_id if material_id >= 0 else None,
+                    "material_name": material_names[material_id] if material_id >= 0 else None,
+                    "rgba": (
+                        self.model.mat_rgba[material_id].tolist()
+                        if material_id >= 0
+                        else self.model.geom_rgba[geom_id].tolist()
+                    ),
+                }
+            )
+
+        actuators = []
+        for actuator_id, name in enumerate(self.actuator_names):
+            trn_type_id = int(self.model.actuator_trntype[actuator_id])
+            trn_type = ACTUATOR_TRANSMISSION_TYPES.get(trn_type_id, str(trn_type_id))
+            trn_ids = [int(value) for value in self.model.actuator_trnid[actuator_id].tolist()]
+            actuators.append(
+                {
+                    "id": actuator_id,
+                    "name": name,
+                    "ctrl_index": actuator_id,
+                    "ctrl": float(self.data.ctrl[actuator_id]),
+                    "ctrlrange": self.model.actuator_ctrlrange[actuator_id].tolist(),
+                    "forcerange": self.model.actuator_forcerange[actuator_id].tolist(),
+                    "transmission_type": trn_type,
+                    "transmission_ids": trn_ids,
+                    "target": self.actuator_target_name(trn_type, trn_ids),
+                }
+            )
+
+        return {
+            "nq": int(self.model.nq),
+            "nv": int(self.model.nv),
+            "nu": int(self.model.nu),
+            "bodies": bodies,
+            "joints": joints,
+            "geoms": geoms,
+            "actuators": actuators,
+            "materials": materials,
+        }
+
     def post_chat(self, content: str, session_id: str | None) -> dict[str, Any]:
         content = content.strip()
         if not content:
@@ -347,8 +484,7 @@ class SimState:
         return [
             {
                 "name": arm.name,
-                "actuators": [self.actuator_names[actuator_id] for actuator_id in arm.actuator_ids],
-                "actuator_indices": list(arm.actuator_ids),
+                "control_indices": list(arm.actuator_ids),
                 "ctrl": [float(self.data.ctrl[actuator_id]) for actuator_id in arm.actuator_ids],
                 "assigned": any(session.robot == arm.name for session in self.sessions.values()),
             }
@@ -356,12 +492,39 @@ class SimState:
         ]
 
     def session_payload(self, session: Session) -> dict[str, Any]:
-        return {
+        payload = {
             "session": session.session_id,
             "agent_id": session.agent_id,
             "name": session.name,
             "robot": session.robot,
         }
+        if session.robot and session.robot in self.arms_by_name:
+            payload["control_indices"] = list(self.arms_by_name[session.robot].actuator_ids)
+        return payload
+
+    def actuator_target_name(self, trn_type: str, trn_ids: list[int]) -> dict[str, Any] | None:
+        target_id = trn_ids[0]
+        if target_id < 0:
+            return None
+        if trn_type in ("joint", "jointinparent", "slidercrank"):
+            return {
+                "type": "joint",
+                "id": target_id,
+                "name": self.joint_names[target_id] if target_id < len(self.joint_names) else None,
+            }
+        if trn_type == "tendon":
+            name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_TENDON, target_id)
+            return {"type": "tendon", "id": target_id, "name": name}
+        if trn_type == "site":
+            name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_SITE, target_id)
+            return {"type": "site", "id": target_id, "name": name}
+        if trn_type == "body":
+            return {
+                "type": "body",
+                "id": target_id,
+                "name": self.body_names[target_id] if target_id < len(self.body_names) else None,
+            }
+        return {"type": trn_type, "id": target_id, "name": None}
 
     def next_available_robot_locked(self) -> str | None:
         assigned = {session.robot for session in self.sessions.values()}
@@ -477,9 +640,6 @@ def create_app(sim: SimState, manage_sim: bool = True) -> FastAPI:
             if not isinstance(ctrl, list) or not all(isinstance(value, int | float) for value in ctrl):
                 raise HTTPException(status_code=400, detail="SetControl requires data.ctrl as a list of numbers")
             return sim.set_control([float(value) for value in ctrl], x_session)
-
-        if action.type == "Reset":
-            return sim.reset(x_session)
 
         raise HTTPException(status_code=400, detail=f"unknown input type: {action.type}")
 
