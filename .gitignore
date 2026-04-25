@@ -21,3 +21,6 @@ assets/pink.png
 assets/robo.png
 assets/robo.mov
 
+.codex
+.clawblox-multi/
+worlds/*/results/

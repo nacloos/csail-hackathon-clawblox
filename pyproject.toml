@@ -1,0 +1,17 @@
+[project]
+name = "csail-hackathon-clawblox"
+version = "0.1.0"
+description = "MuJoCo Panda sandbox for Clawblox-style agents."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115",
+  "h5py>=3.12",
+  "mujoco>=3.2",
+  "numpy>=2.0",
+  "uvicorn>=0.30",
+]
+
+[dependency-groups]
+dev = [
+  "httpx>=0.27",
+]
