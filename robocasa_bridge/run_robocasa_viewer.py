@@ -18,7 +18,7 @@ flag, which the main loop drains.
 
 Run:
 
-    DISPLAY=:0 uv run python run_robocasa_viewer.py
+    DISPLAY=:0 uv run python robocasa_bridge/run_robocasa_viewer.py
 """
 
 from __future__ import annotations

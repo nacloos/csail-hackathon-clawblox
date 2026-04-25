@@ -28,7 +28,8 @@
       "Bash(uv run *)",
       "Bash(curl -s http://127.0.0.1:8080/observe)",
       "Bash(curl -sf http://127.0.0.1:8080/spec)",
-      "Bash(chmod +x /home/dadur/Workspace/csail-hackathon-clawblox/install.sh)"
+      "Bash(chmod +x /home/dadur/Workspace/csail-hackathon-clawblox/install.sh)",
+      "Bash(curl -s http://127.0.0.1:8080/spec)"
     ]
   }
 }

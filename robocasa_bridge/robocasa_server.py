@@ -14,7 +14,7 @@ names) lives at GET /spec.
 
 Run:
 
-    uv run python robocasa_server.py
+    uv run python robocasa_bridge/robocasa_server.py
 """
 
 from __future__ import annotations

@@ -61,8 +61,8 @@ point at either backend.
 One-shot install:
 
 ```bash
-./install.sh
+./robocasa_bridge/install.sh
 ```
 
-See [RoboCasa_README.md](RoboCasa_README.md) for run instructions, the
-action vector layout, and a Python client example.
+See [robocasa_bridge/README.md](robocasa_bridge/README.md) for run
+instructions, the action vector layout, and a Python client example.

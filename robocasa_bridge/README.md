@@ -8,7 +8,7 @@ this repo, so a single agent can target either backend.
 ## Install
 
 ```bash
-./install.sh
+./robocasa_bridge/install.sh
 ```
 
 That single command will:
@@ -26,28 +26,28 @@ That single command will:
 Flags:
 
 ```bash
-./install.sh --skip-assets   # skip the multi-GB download (most scenes will fail to load)
-./install.sh --force-assets  # re-download even if assets are already present
-./install.sh --help
+./robocasa_bridge/install.sh --skip-assets   # skip the multi-GB download (most scenes will fail to load)
+./robocasa_bridge/install.sh --force-assets  # re-download even if assets are already present
+./robocasa_bridge/install.sh --help
 ```
 
 The asset step is gated on whether `models/assets/textures` and
-`models/assets/objects/objaverse` are non-empty, so re-running
-`./install.sh` after a successful install is a fast no-op.
+`models/assets/objects/objaverse` are non-empty, so re-running the
+installer after a successful install is a fast no-op.
 
 ## Run
 
 **Headless server** — HTTP only, no window, runs anywhere:
 
 ```bash
-uv run python robocasa_server.py
+uv run python robocasa_bridge/robocasa_server.py
 ```
 
 **Server with viewer** — opens robosuite's native `mjviewer` window. On
 WSLg you'll need `DISPLAY` exported (`:0` is the usual value):
 
 ```bash
-DISPLAY=:0 uv run python run_robocasa_viewer.py
+DISPLAY=:0 uv run python robocasa_bridge/run_robocasa_viewer.py
 ```
 
 The viewer uses robosuite's `mjviewer` rather than `mujoco.viewer.launch_passive`
@@ -64,7 +64,7 @@ Set env vars before launching:
 ROBOCASA_ENV=PickPlaceCounterToCabinet \
 ROBOCASA_ROBOT=PandaOmron \
 ROBOCASA_CONTROL_FREQ=20 \
-  uv run python robocasa_server.py
+  uv run python robocasa_bridge/robocasa_server.py
 ```
 
 Defaults are `PickPlaceCounterToCabinet` / `PandaOmron` / `20 Hz`. Any
@@ -73,8 +73,8 @@ adds the kitchen tasks to that registry on import.
 
 ## HTTP API
 
-Full schema lives in [API.md](API.md). The two endpoints you'll touch
-most:
+Full schema lives in [../API.md](../API.md). The two endpoints you'll
+touch most:
 
 ```bash
 # Observation (raw mujoco state + full robosuite obs dict + robot summary)
@@ -168,14 +168,14 @@ pre-extracted. Common fields:
 
 ## Troubleshooting
 
-* **`No module named 'robocasa'`** — re-run `./install.sh`. The vendored
+* **`No module named 'robocasa'`** — re-run `./robocasa_bridge/install.sh`. The vendored
   package is installed editable, so a partial `uv sync` may have skipped
   it.
 * **Viewer is blank or crashes on WSL** — make sure `DISPLAY` is set
   (`echo $DISPLAY`) and that you're running `run_robocasa_viewer.py`,
   not `mujoco.viewer.launch_passive`. `launch_passive` doesn't survive
   the kitchen scene's geometry upload on WSLg.
-* **Asset download dies partway** — re-run `./install.sh --force-assets`.
+* **Asset download dies partway** — re-run `./robocasa_bridge/install.sh --force-assets`.
   The download script overwrites partial extractions.
 * **`SetControl` returns 422** — your `ctrl` array length doesn't match
   `spec.action.dim`. Fetch `/spec` once and use that as the length.

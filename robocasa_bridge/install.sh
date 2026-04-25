@@ -3,13 +3,14 @@
 #
 # Installs Python deps via uv, copies robocasa's macros template into a
 # private macros file, and downloads the ~10 GB kitchen asset bundle if
-# it isn't already on disk.
+# it isn't already on disk. Safe to run from anywhere — the script anchors
+# itself to the repo root via its own location.
 #
 # Usage:
-#   ./install.sh                # full setup
-#   ./install.sh --skip-assets  # skip the kitchen asset download
-#   ./install.sh --force-assets # re-download assets even if present
-#   ./install.sh --help
+#   ./robocasa_bridge/install.sh                # full setup
+#   ./robocasa_bridge/install.sh --skip-assets  # skip the kitchen asset download
+#   ./robocasa_bridge/install.sh --force-assets # re-download assets even if present
+#   ./robocasa_bridge/install.sh --help
 
 set -euo pipefail
 
@@ -19,7 +20,7 @@ yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 red()    { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 
 usage() {
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 }
 
@@ -34,11 +35,12 @@ for arg in "$@"; do
     esac
 done
 
-REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 if [[ ! -f pyproject.toml ]]; then
-    red "pyproject.toml not found in $REPO_ROOT — run install.sh from the repo root."
+    red "pyproject.toml not found in $REPO_ROOT — expected the bridge folder to live one level under the repo root."
     exit 1
 fi
 
@@ -108,6 +110,6 @@ PY
 
 green ""
 green "robocasa bridge is ready. Next steps:"
-green "  headless server :  uv run python robocasa_server.py"
-green "  with viewer     :  DISPLAY=:0 uv run python run_robocasa_viewer.py"
-green "  client API docs :  see RoboCasa_README.md"
+green "  headless server :  uv run python robocasa_bridge/robocasa_server.py"
+green "  with viewer     :  DISPLAY=:0 uv run python robocasa_bridge/run_robocasa_viewer.py"
+green "  client API docs :  see robocasa_bridge/README.md"
