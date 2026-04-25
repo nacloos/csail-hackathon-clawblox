@@ -37,6 +37,11 @@ class SimState:
         self.actuator_names = self._names(mujoco.mjtObj.mjOBJ_ACTUATOR, self.model.nu)
         self.joint_names = self._names(mujoco.mjtObj.mjOBJ_JOINT, self.model.njnt)
         self.body_names = self._names(mujoco.mjtObj.mjOBJ_BODY, self.model.nbody)
+        self.object_body_ids = [
+            body_id
+            for body_id, name in enumerate(self.body_names)
+            if name.startswith(("block_", "brick_", "plank_", "pillar_"))
+        ]
         self.reset()
 
     def start(self) -> None:
@@ -70,6 +75,7 @@ class SimState:
             return self.observe_locked()
 
     def observe_locked(self) -> dict[str, Any]:
+        objects = self.objects_locked()
         return {
             "time": float(self.data.time),
             "qpos": self.data.qpos.tolist(),
@@ -85,7 +91,19 @@ class SimState:
                 "joints": self.joint_names,
                 "bodies": self.body_names,
             },
+            "objects": objects,
+            "blocks": objects,
         }
+
+    def objects_locked(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": self.body_names[body_id],
+                "position": self.data.xpos[body_id].tolist(),
+                "quaternion": self.data.xquat[body_id].tolist(),
+            }
+            for body_id in self.object_body_ids
+        ]
 
     def _run_realtime(self) -> None:
         next_step = time.perf_counter()

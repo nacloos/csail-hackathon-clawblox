@@ -36,9 +36,21 @@ Returns raw MuJoCo state:
     "actuators": [],
     "joints": [],
     "bodies": []
-  }
+  },
+  "objects": [
+    {
+      "name": "block_red",
+      "position": [x, y, z],
+      "quaternion": [w, x, y, z]
+    }
+  ],
+  "blocks": []
 }
 ```
+
+`objects` contains construction objects such as blocks, bricks, planks,
+and pillars. `blocks` is currently an alias for compatibility with earlier
+agents.
 
 ### Get Agent API
 
