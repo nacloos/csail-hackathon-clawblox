@@ -41,12 +41,13 @@ log = logging.getLogger("minimax")
 
 # ── config ────────────────────────────────────────────────────────────────────
 
-WORLD_URL  = os.getenv("WORLD_URL", "http://localhost:8080")
-MODEL      = os.getenv("MODEL", "minimax-m2.7")
-BASE_URL   = "https://api.minimax.io/anthropic"
-API_KEY    = os.getenv("MINIMAX_API_KEY", "")
-MAX_TURNS  = 40
-AGENT_NAME = "minimax-agent"
+WORLD_URL       = os.getenv("WORLD_URL", "http://localhost:8080")
+MODEL           = os.getenv("MODEL", "minimax-m2.7")
+BASE_URL        = "https://api.minimax.io/anthropic"
+API_KEY         = os.getenv("MINIMAX_API_KEY", "")
+MAX_TURNS       = 40
+AGENT_NAME      = "minimax-agent"
+THINKING_BUDGET = int(os.getenv("THINKING_BUDGET", "0"))  # 0 = off, >0 = on
 
 # ── sim session ───────────────────────────────────────────────────────────────
 
@@ -197,7 +198,7 @@ Use tools to observe and act. Be direct — call tools immediately.
 
 
 def run(task: str, model: str = MODEL, world_url: str = WORLD_URL,
-        verbose: bool = True) -> str:
+        verbose: bool = True, thinking_budget: int = THINKING_BUDGET) -> str:
     if not API_KEY:
         print("MINIMAX_API_KEY not set", file=sys.stderr)
         sys.exit(1)
@@ -212,17 +213,24 @@ def run(task: str, model: str = MODEL, world_url: str = WORLD_URL,
     system   = build_system(sim, api_doc)
     client   = anthropic.Anthropic(api_key=API_KEY, base_url=BASE_URL)
     messages = [{"role": "user", "content": task}]
-    log.info("task: %s", task)
+    log.info("task: %s  thinking_budget=%d", task, thinking_budget)
+
+    # thinking params — same pattern as swarm-controller/llm_utils.py
+    thinking_kwargs: dict = {}
+    if thinking_budget > 0:
+        thinking_kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
 
     try:
         for turn in range(MAX_TURNS):
-            log.info("turn %d — calling %s", turn + 1, model)
+            log.info("turn %d — calling %s (thinking=%s)", turn + 1, model,
+                     "on" if thinking_budget > 0 else "off")
             resp = client.messages.create(
                 model=model,
-                max_tokens=1024,
+                max_tokens=max(1024, thinking_budget + 1024) if thinking_budget > 0 else 1024,
                 system=system,
                 tools=TOOLS,
                 messages=messages,
+                **thinking_kwargs,
             )
             log.info("turn %d — stop_reason=%s input_tokens=%s output_tokens=%s",
                      turn + 1, resp.stop_reason,
@@ -231,7 +239,10 @@ def run(task: str, model: str = MODEL, world_url: str = WORLD_URL,
             messages.append({"role": "assistant", "content": resp.content})
 
             for block in resp.content:
-                if hasattr(block, "text") and block.text:
+                if block.type == "thinking":
+                    snippet = block.thinking[:200].replace("\n", " ")
+                    log.info("[think] %s%s", snippet, "…" if len(block.thinking) > 200 else "")
+                elif hasattr(block, "text") and block.text:
                     log.info("[agent] %s", block.text)
                 elif block.type == "tool_use":
                     log.info("[tool]  %s(%s)", block.name,
@@ -275,10 +286,13 @@ def main() -> None:
     parser.add_argument("--model", default=MODEL)
     parser.add_argument("--world", default=WORLD_URL)
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--thinking", type=int, default=THINKING_BUDGET,
+                        metavar="BUDGET", help="thinking budget tokens (0=off)")
     args = parser.parse_args()
 
     result = run(" ".join(args.task), model=args.model,
-                 world_url=args.world, verbose=not args.quiet)
+                 world_url=args.world, verbose=not args.quiet,
+                 thinking_budget=args.thinking)
     print(f"\n[done] {result}")
 
 
