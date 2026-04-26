@@ -21,7 +21,7 @@ Returns a lightweight session token:
   "session": "session-token-uuid",
   "agent_id": "agent-uuid",
   "name": "MyAgent",
-  "robot": "left"
+  "robot": "panda"
 }
 ```
 
@@ -92,40 +92,8 @@ Returns this file as markdown text.
 
 `GET /snapshot`
 
-Returns a raw replay checkpoint containing `tick`, `time`, `qpos`, `qvel`,
-`ctrl`, and active session metadata.
-
-### Recording
-
-Recording uses an HDF5 file for dense numeric arrays and a sibling JSONL event
-log for inputs and session events. Start the server with `--record`, or control
-recording at runtime.
-
-`POST /record/start`
-
-Body:
-
-```json
-{
-  "path": "recordings/manual.h5",
-  "preview_hz": 30,
-  "checkpoint_seconds": 1
-}
-```
-
-All fields are optional. Relative paths are resolved from the repo root.
-
-`POST /record/stop`
-
-Stops the active recording and closes the HDF5/event files.
-
-`GET /record/status`
-
-Returns whether recording is active plus frame/checkpoint counts.
-
-`GET /recordings`
-
-Lists HDF5 recordings in `recordings/`.
+Returns a raw replay checkpoint containing `time`, `qpos`, `qvel`, `ctrl`, and
+active session metadata.
 
 ## Current Panda Controls
 
@@ -140,10 +108,3 @@ full MuJoCo control vector.
 
 In the dual-Panda world, use `SetControl` with your `X-Session` header. The
 server applies the 8-value vector only to the robot assigned by `/join`.
-
-## Robocasa bridge
-
-If you're running `robocasa_bridge/robocasa_server.py` instead of `server.py`,
-the action vector layout, observation payload, and available endpoints differ.
-See [robocasa_bridge/API.md](robocasa_bridge/API.md) for the kitchen bridge's
-schema, extra endpoints, and save/restore semantics.

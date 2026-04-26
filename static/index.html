@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ClawBlox · CSAIL Agentic AI Hackathon</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mit">MIT</div>
+      <div class="brand-mark">
+        <span class="mc orange">C</span><span class="mc orange">S</span><span class="mc gold">A</span><span class="mc silver">I</span><span class="mc orange">L</span>
+      </div>
+      <div class="brand-sub">Agentic AI Hackathon · April 2026</div>
+      <div class="brand-tag">clawblox · the agents are running the show</div>
+    </div>
+
+    <button id="newRunBtn" class="btn primary block">+ summon a new agent</button>
+    <input type="file" id="fileInput" accept="video/*" hidden />
+
+    <nav class="runs">
+      <div class="runs-header">Agent Roster</div>
+      <ul id="runsList"></ul>
+    </nav>
+
+    <div class="legend">
+      <div><span class="dot dot-running"></span>thinking</div>
+      <div><span class="dot dot-needs"></span>needs human</div>
+      <div><span class="dot dot-done"></span>shipped</div>
+      <div><span class="dot dot-idle"></span>napping</div>
+    </div>
+
+    <footer class="sidebar-foot">
+      built at MIT CSAIL · agents in the loop · 04/26
+    </footer>
+  </aside>
+
+  <main class="main" id="main">
+    <header class="topbar">
+      <div id="runTitle" class="run-title">Pick a run, or summon a new agent.</div>
+      <div class="run-status">
+        <span id="runStatus"></span>
+        <button id="fitBtn" class="btn ghost small" title="fit to screen">↔ fit</button>
+        <button id="resetBtn" class="btn ghost small" title="reset zoom">100%</button>
+      </div>
+    </header>
+
+    <div id="empty" class="empty-state">
+      <div class="card empty-card">
+        <div class="hero-badge">CSAIL · Agentic AI Hackathon · April 2026</div>
+        <h2>Toss a clip in. The agents will sort it out.</h2>
+        <p class="muted">Pegasus 1.5 chops it into scenes. You pick one. GPT-5.4-nano
+          reads the first frame and writes 8 reskin prompts. Approve them
+          (or regenerate the boring ones), let GPT-5.4-image-2 paint, and Decart
+          Lucy Edit 2.1 stitches it back into video. Many tiny employees, one
+          conveyor belt.</p>
+        <label class="dropzone" id="dropzone">
+          <strong>Drop a video here</strong>
+          <span>or <button class="link" id="browseBtn">browse</button> · mp4 / mov / webm · ≥ 4 s</span>
+        </label>
+        <div class="footnote muted">
+          all stages cache; close the tab and come back, the agents remember.
+        </div>
+      </div>
+    </div>
+
+    <section id="run" class="run hidden">
+      <div id="canvas" class="canvas">
+        <div id="canvas-content" class="canvas-content">
+          <svg id="wires" class="wires" xmlns="http://www.w3.org/2000/svg"></svg>
+          <div id="nodes" class="nodes"></div>
+        </div>
+        <div class="canvas-hint">scroll to zoom · drag empty space to pan</div>
+      </div>
+
+      <details class="logbox">
+        <summary>pipeline.log (tail)</summary>
+        <pre id="log"></pre>
+      </details>
+    </section>
+
+    <!-- right-side drawer for rich interactions -->
+    <aside id="drawer" class="drawer hidden">
+      <div class="drawer-head">
+        <div id="drawerTitle" class="drawer-title">…</div>
+        <button class="btn ghost small" id="drawerClose">close</button>
+      </div>
+      <div id="drawerBody" class="drawer-body"></div>
+    </aside>
+    <div id="drawerScrim" class="drawer-scrim hidden"></div>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

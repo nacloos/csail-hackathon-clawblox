@@ -73,8 +73,8 @@ adds the kitchen tasks to that registry on import.
 
 ## HTTP API
 
-Full schema lives in [../API.md](../API.md). The two endpoints you'll
-touch most:
+Full schema lives in [./API.md](./API.md) (and the shared session/`/observe`
+shape in [../API.md](../API.md)). The two endpoints you'll touch most:
 
 ```bash
 # Observation (raw mujoco state + full robosuite obs dict + robot summary)

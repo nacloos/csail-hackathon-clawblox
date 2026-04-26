@@ -178,6 +178,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "h5py" },
     { name = "mujoco" },
     { name = "numpy" },
     { name = "pydantic" },
@@ -186,16 +187,25 @@ dependencies = [
     { name = "uvicorn" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "httpx" },
+]
+
 [package.metadata]
 requires-dist = [
-    { name = "fastapi", specifier = ">=0.110" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "h5py", specifier = ">=3.12" },
     { name = "mujoco", specifier = ">=3.2" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pydantic", specifier = ">=2.6" },
     { name = "robocasa", editable = "vendor/robocasa" },
     { name = "robosuite", git = "https://github.com/ARISE-Initiative/robosuite" },
-    { name = "uvicorn", specifier = ">=0.27" },
+    { name = "uvicorn", specifier = ">=0.30" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "httpx", specifier = ">=0.27" }]
 
 [[package]]
 name = "click"
