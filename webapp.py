@@ -29,6 +29,7 @@ PROJ = Path(__file__).resolve().parent
 RUNS_DIR = PROJ / "runs"
 STATIC = PROJ / "static"
 PIPELINE = PROJ / "pipeline.py"
+AGENT_LAUNCHER = PROJ / "pipeline_agent.sh"
 
 
 # --------------------------------------------------------------- subprocess mgr
@@ -52,9 +53,12 @@ class JobManager:
         log_f.write(f"\n--- spawn {datetime.now().isoformat()} ---\n".encode())
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
-        # uv ensures httpx is available; same invocation pattern the user uses.
+        # uv ensures httpx + runwayml are available regardless of which model
+        # the run uses (runwayml is only imported when model=runway, but
+        # bundling it here keeps the spawn cost predictable).
         cmd = [
-            "uv", "run", "--with", "httpx", "python", str(PIPELINE),
+            "uv", "run", "--with", "httpx", "--with", "runwayml",
+            "python", str(PIPELINE),
             "--run-dir", str(run_dir),
         ]
         p = subprocess.Popen(
@@ -77,7 +81,65 @@ class JobManager:
                 p.kill()
 
 
+class AgentManager:
+    """One Claude Code agent per run, polling the webapp until done."""
+
+    def __init__(self) -> None:
+        self.procs: dict[str, subprocess.Popen] = {}
+
+    def is_running(self, name: str) -> bool:
+        p = self.procs.get(name)
+        return p is not None and p.poll() is None
+
+    def kick(self, run_dir: Path, webapp_url: str) -> None:
+        name = run_dir.name
+        if self.is_running(name):
+            return
+        if not AGENT_LAUNCHER.exists():
+            raise RuntimeError(f"agent launcher missing: {AGENT_LAUNCHER}")
+        env = os.environ.copy()
+        env["WEBAPP_URL"] = webapp_url
+        # Mark this run as agent-driven so the UI hides gate prompts.
+        (run_dir / "agent_mode.flag").write_text(datetime.now().isoformat())
+        # The launcher writes its own log to runs/<name>/agent.log; keep stdio
+        # attached to the same file in case the launcher itself errors before
+        # exec'ing claude.
+        log = run_dir / "agent.log"
+        log_f = log.open("ab")
+        log_f.write(f"\n--- spawn agent {datetime.now().isoformat()} ---\n".encode())
+        p = subprocess.Popen(
+            [str(AGENT_LAUNCHER), name],
+            stdin=subprocess.DEVNULL,
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
+            cwd=str(PROJ),
+            env=env,
+        )
+        self.procs[name] = p
+
+    def stop(self, name: str) -> None:
+        p = self.procs.get(name)
+        if p and p.poll() is None:
+            p.terminate()
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        flag = RUNS_DIR / name / "agent_mode.flag"
+        flag.unlink(missing_ok=True)
+
+
 jobs = JobManager()
+agents = AgentManager()
+
+
+def _webapp_self_url() -> str:
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = os.environ.get("PORT", "8000")
+    # 0.0.0.0 isn't reachable from a child process the same way; rewrite.
+    if host in ("0.0.0.0", ""):
+        host = "127.0.0.1"
+    return f"http://{host}:{port}"
 
 
 # ---------------------------------------------------------- run state model
@@ -100,6 +162,9 @@ def compute_state(run_dir: Path) -> dict:
     state: dict[str, Any] = {
         "name": name,
         "running": jobs.is_running(name),
+        "agent_running": agents.is_running(name),
+        "mode": "agent" if (run_dir / "agent_mode.flag").exists() else "manual",
+        "model": "lucy",  # overridden below from metadata.json
         "input": None,
         "segments": None,
         "chosen": None,
@@ -118,6 +183,8 @@ def compute_state(run_dir: Path) -> dict:
     if meta:
         state["input"] = meta
         state["source_video"] = _file_url(name, Path("00_input/source.mp4"))
+        if meta.get("model") in ("lucy", "runway"):
+            state["model"] = meta["model"]
 
     segs = _read_json_safe(run_dir / "01_twelvelabs" / "segments.json")
     if segs is not None:
@@ -172,21 +239,43 @@ def compute_state(run_dir: Path) -> dict:
         if len(reconstructed) >= state["count"]:
             state["approved_prompts"] = reconstructed[: state["count"]]
 
-    le_dir = run_dir / "05_lucy_edit"
-    if le_dir.exists():
-        for sub in sorted(le_dir.glob("var_*")):
-            idx = int(sub.name.split("_")[1])
+    # Stage-5 output dir depends on the render model. Old runs may only have
+    # 05_lucy_edit; new runway runs land in 05_runway. Read whichever exists.
+    out_dir_name = "05_runway" if state["model"] == "runway" else "05_lucy_edit"
+    out_dir = run_dir / out_dir_name
+    if not out_dir.exists():
+        # fall back to whichever dir the run actually has on disk
+        for candidate in ("05_lucy_edit", "05_runway"):
+            if (run_dir / candidate).exists():
+                out_dir = run_dir / candidate
+                out_dir_name = candidate
+                break
+    if out_dir.exists():
+        for sub in sorted(out_dir.glob("var_*")):
+            if not sub.name.startswith("var_"):
+                continue
+            try:
+                idx = int(sub.name.split("_")[1])
+            except (ValueError, IndexError):
+                continue
             out = sub / "output.mp4"
             poll = _read_json_safe(sub / "poll.json")
             state["outputs"].append({
                 "index": idx,
-                "video": _file_url(name, Path(f"05_lucy_edit/{sub.name}/output.mp4"))
+                "video": _file_url(name, Path(f"{out_dir_name}/{sub.name}/output.mp4"))
                 if out.exists() else None,
                 "status": (poll or {}).get("status") if poll else None,
             })
 
     # Determine gate / overall status.
-    if state["segments"] is not None and not state["chosen"]:
+    if (state["input"] is not None
+            and state["segments"] is None
+            and not state["running"]):
+        # Pre-pipeline: clip uploaded but the user hasn't approved sending to
+        # TwelveLabs/Pegasus yet. Manual runs sit here until the user clicks
+        # "send to TwelveLabs"; agent-mode runs are auto-kicked at upload.
+        state["gate"] = "start"
+    elif state["segments"] is not None and not state["chosen"]:
         state["gate"] = "pick-segment"
     elif state["analysis"] and state["count"] is None:
         state["gate"] = "choose-count"
@@ -201,6 +290,27 @@ def compute_state(run_dir: Path) -> dict:
                 size = f.tell()
                 f.seek(max(0, size - 8192))
                 state["log_tail"] = f.read().decode("utf-8", errors="replace")
+        except OSError:
+            pass
+
+    decisions = run_dir / "agent_decisions.log"
+    if decisions.exists():
+        try:
+            state["agent_decisions"] = decisions.read_text(errors="replace")
+        except OSError:
+            state["agent_decisions"] = ""
+    else:
+        state["agent_decisions"] = ""
+
+    agent_log = run_dir / "agent.log"
+    state["agent_log_tail"] = ""
+    if agent_log.exists():
+        try:
+            with agent_log.open("rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - 16384))
+                state["agent_log_tail"] = f.read().decode("utf-8", errors="replace")
         except OSError:
             pass
 
@@ -234,6 +344,8 @@ def list_runs() -> list[dict]:
             status = "needs-count"
         elif (d / "04_variations" / ".count").exists() and not (d / "04_variations" / "approved_prompts.json").exists():
             status = "needs-approval"
+        elif meta and not (d / "01_twelvelabs" / "segments.json").exists():
+            status = "needs-start"
         elif meta:
             status = "idle"
         else:
@@ -248,7 +360,7 @@ def list_runs() -> list[dict]:
 
 # -------------------------------------------------------------------- app
 
-app = FastAPI(title="ClawBlox")
+app = FastAPI(title="RoboClaw")
 
 
 @app.get("/")
@@ -286,7 +398,15 @@ def _safe_name(stem: str) -> str:
 
 
 @app.post("/api/runs")
-async def api_create_run(file: UploadFile = File(...)) -> JSONResponse:
+async def api_create_run(
+    file: UploadFile = File(...),
+    mode: str = Form("manual"),
+    model: str = Form("lucy"),
+) -> JSONResponse:
+    if mode not in ("manual", "agent"):
+        raise HTTPException(400, "mode must be 'manual' or 'agent'")
+    if model not in ("lucy", "runway"):
+        raise HTTPException(400, "model must be 'lucy' or 'runway'")
     if not file.filename:
         raise HTTPException(400, "missing filename")
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -351,9 +471,69 @@ async def api_create_run(file: UploadFile = File(...)) -> JSONResponse:
     (in_dir / "metadata.json").write_text(json.dumps({
         "source_path": file.filename,
         "duration": dur, "width": w, "height": h,
+        "model": model,
     }, indent=2))
-    jobs.kick(run_dir)
-    return JSONResponse({"name": run_dir.name})
+    # Manual mode: do NOT auto-kick. The user must click "send to TwelveLabs"
+    # so they can review the model choice and avoid burning Pegasus credits
+    # by accident. Agent mode kicks immediately because the agent will
+    # auto-approve through the start gate via its polling loop.
+    if mode == "agent":
+        jobs.kick(run_dir)
+        try:
+            agents.kick(run_dir, _webapp_self_url())
+        except Exception as e:
+            # Don't fail the run if the agent can't start; surface a hint instead.
+            (run_dir / "agent.log").write_text(f"failed to spawn agent: {e}\n")
+    return JSONResponse({"name": run_dir.name, "mode": mode, "model": model})
+
+
+@app.post("/api/runs/{name}/start")
+async def api_start(name: str, request: Request) -> JSONResponse:
+    """Pass the start gate: kick the pipeline subprocess. Optionally
+    update the render model choice at the same time."""
+    run = RUNS_DIR / name
+    if not run.exists():
+        raise HTTPException(404, "no such run")
+    meta_path = run / "00_input" / "metadata.json"
+    if not meta_path.exists():
+        raise HTTPException(400, "no metadata yet")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    new_model = body.get("model")
+    if new_model is not None:
+        if new_model not in ("lucy", "runway"):
+            raise HTTPException(400, "model must be 'lucy' or 'runway'")
+        meta = _read_json_safe(meta_path) or {}
+        if meta.get("model") != new_model:
+            meta["model"] = new_model
+            meta_path.write_text(json.dumps(meta, indent=2))
+    jobs.kick(run)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/runs/{name}/summon-agent")
+async def api_summon_agent(name: str) -> JSONResponse:
+    run = RUNS_DIR / name
+    if not run.exists():
+        raise HTTPException(404, "no such run")
+    if agents.is_running(name):
+        return JSONResponse({"ok": True, "already_running": True})
+    try:
+        agents.kick(run, _webapp_self_url())
+    except Exception as e:
+        raise HTTPException(500, f"could not start agent: {e}")
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/runs/{name}/dismiss-agent")
+async def api_dismiss_agent(name: str) -> JSONResponse:
+    run = RUNS_DIR / name
+    if not run.exists():
+        raise HTTPException(404, "no such run")
+    agents.stop(name)
+    return JSONResponse({"ok": True})
 
 
 @app.post("/api/runs/{name}/pick-segment")
@@ -505,4 +685,6 @@ if __name__ == "__main__":
     import uvicorn
 
     RUNS_DIR.mkdir(exist_ok=True)
-    uvicorn.run("webapp:app", host="127.0.0.1", port=8000, reload=False)
+    port = int(os.environ.get("PORT", "8000"))
+    host = os.environ.get("HOST", "127.0.0.1")
+    uvicorn.run("webapp:app", host=host, port=port, reload=False)

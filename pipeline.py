@@ -1,12 +1,17 @@
-"""Clip -> TwelveLabs segments -> GPT analysis -> image variations -> Decart Lucy Edit.
+"""Clip -> TwelveLabs segments -> GPT analysis -> image variations -> render.
+
+Renderers:
+- Lucy Edit (Decart) — default, requires DECART_API_KEY
+- Runway Aleph (gen4_aleph) — opt-in via run metadata, requires RUNWAYML_API_SECRET
 
 Usage (new run):
-    uv run --with httpx python pipeline.py --input path/to/clip.mp4
+    uv run --with httpx --with runwayml python pipeline.py --input path/to/clip.mp4
 
 Usage (resume an existing run):
-    uv run --with httpx python pipeline.py --run-dir runs/20260425-140000_clip
+    uv run --with httpx --with runwayml python pipeline.py --run-dir runs/20260425-140000_clip
 
-Reads OPENROUTER_API_KEY, TWELVELABS_API_KEY, DECART_API_KEY from .env (or env).
+Reads OPENROUTER_API_KEY, TWELVELABS_API_KEY, plus DECART_API_KEY or
+RUNWAYML_API_SECRET (depending on the chosen render model) from .env (or env).
 Per-run artifacts land in runs/<timestamp>_<basename>/.
 """
 
@@ -139,6 +144,34 @@ def ffmpeg_first_frame(src: Path, out: Path) -> None:
     )
 
 
+def ffmpeg_concat(parts: list[Path], out: Path) -> None:
+    """Lossless concat via the demuxer (parts must share codec params)."""
+    if not parts:
+        raise RuntimeError("ffmpeg_concat: empty parts list")
+    if len(parts) == 1:
+        # Just copy.
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(parts[0].read_bytes())
+        return
+    out.parent.mkdir(parents=True, exist_ok=True)
+    list_file = out.parent / f".{out.stem}_concat.txt"
+    list_file.write_text("".join(f"file '{p.resolve()}'\n" for p in parts))
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-f", "concat", "-safe", "0",
+                "-i", str(list_file),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(out),
+            ],
+            check=True,
+        )
+    finally:
+        list_file.unlink(missing_ok=True)
+
+
 # ----------------------------------------------------------- http helpers
 
 class HTTPError(RuntimeError):
@@ -244,8 +277,11 @@ async def tl_submit_segment(client: httpx.AsyncClient, key: str, asset_id: str) 
                 {
                     "id": "scenes",
                     "description": (
-                        "Segment the video into distinct scenes based on changes in "
-                        "setting, action, camera movement, or visual composition."
+                        "Segment the video into short clips of approximately 5 "
+                        "seconds each. No clip may exceed 5 seconds. Split longer "
+                        "scenes by sub-action, shot change, or camera movement. "
+                        "Each clip should have a stable, identifiable subject "
+                        "suitable for stylistic reskinning."
                     ),
                     "fields": [
                         {"name": "title", "type": "string",
@@ -286,8 +322,38 @@ async def tl_wait_task_ready(client: httpx.AsyncClient, key: str, task_id: str) 
     raise HTTPError("tl task readiness timeout")
 
 
+SEG_TARGET_MIN = 2.5
+SEG_TARGET_MAX = 5.0
+
+
+def _split_long_segment(seg: dict) -> list[dict]:
+    """Split a segment > SEG_TARGET_MAX into evenly-sized sub-windows in [4, 10]s."""
+    dur = seg["end_time"] - seg["start_time"]
+    if dur <= SEG_TARGET_MAX:
+        return [seg]
+    import math
+    n = max(1, math.ceil(dur / SEG_TARGET_MAX))
+    win = dur / n
+    # Aim for sub-windows ≥ SEG_TARGET_MIN; if win drops below it, use fewer pieces.
+    while win < SEG_TARGET_MIN and n > 1:
+        n -= 1
+        win = dur / n
+    out = []
+    base_title = seg.get("title", "")
+    base_desc = seg.get("description", "")
+    for i in range(n):
+        s = seg["start_time"] + i * win
+        e = seg["start_time"] + (i + 1) * win if i < n - 1 else seg["end_time"]
+        title = f"{base_title} (part {i+1}/{n})" if base_title and n > 1 else base_title
+        out.append({
+            "start_time": s, "end_time": e,
+            "title": title, "description": base_desc,
+        })
+    return out
+
+
 def tl_parse_segments(task_response: dict) -> list[dict]:
-    """Pull the {scenes:[...]} list out of task.result.data."""
+    """Pull the {scenes:[...]} list out of task.result.data and enforce 4-10s."""
     result = task_response.get("result") or task_response.get("data", {}).get("result") or {}
     raw = result.get("data")
     if isinstance(raw, str):
@@ -303,12 +369,17 @@ def tl_parse_segments(task_response: dict) -> list[dict]:
     out = []
     for s in scenes:
         meta = s.get("metadata") or {}
-        out.append({
+        seg = {
             "start_time": float(s["start_time"]),
             "end_time": float(s["end_time"]),
             "title": meta.get("title", ""),
             "description": meta.get("description", ""),
-        })
+        }
+        # Drop sub-minimum scenes; chop over-maximum scenes into 4-10s sub-windows.
+        dur = seg["end_time"] - seg["start_time"]
+        if dur < SEG_TARGET_MIN:
+            continue
+        out.extend(_split_long_segment(seg))
     return out
 
 
@@ -322,27 +393,44 @@ def b64_data_url(path: Path, mime: str = "image/png") -> str:
     return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode()}"
 
 
-ANALYSIS_PROMPT = """You are shown the FIRST FRAME of a short video clip. The full clip will be re-rendered as 8 stylistic variations using a video-to-video model that takes one reference image (a re-skinned version of this exact frame) and preserves motion/geometry.
+ANALYSIS_PROMPT = """You are shown the FIRST FRAME of a short robotics-data video clip. The full clip will be re-rendered as 8 stylistic variations using a video-to-video model that takes one reference image (a re-skinned version of this exact frame) and preserves motion/geometry.
 
-Your job: identify what should stay invariant across all 8 variations, and what surface attributes can vary, then write 8 distinct text prompts. Each prompt is for an image model that will edit THIS frame to look like the variation while keeping composition identical.
+This is robotics training data. The whole point of the variations is to teach a downstream model that surface appearance is a nuisance variable. So we keep the *physical* scene constant and **boldly** change everything about how it looks.
+
+INVARIANTS (must NOT change across variations):
+- Geometry of objects (shapes, sizes, proportions)
+- Object identity and count (a mug stays a mug; one mug stays one mug)
+- Trajectory and motion (handled by the video model, but don't suggest changes that imply different motion)
+- Spatial relationships (object A on top of object B, robot arm reaching toward target)
+- Camera framing (what's in frame and where)
+
+ALWAYS-VARY (these are NEVER invariants — even if they appear visually striking in the source frame, they are the *point* of the variations and must be different in each prompt):
+- Floor / ground surface (wood plank, polished concrete, dirt, grass, tile, metal grating, sand, carpet, vinyl, marble, gravel, rubber mat, etc. — *do not preserve a checkered or patterned floor; replace it*).
+- Walls / background environment (lab, warehouse, kitchen, outdoors, industrial, abstract void, jungle floor, neon-lit alley, etc.)
+- Surface textures and materials of any non-target objects in the scene
+- Lighting (time of day, harsh shadows vs. diffuse, colored vs. neutral, single-source vs. ambient)
+- Color palette
+
+Specifically: do NOT include the floor pattern, wall color, or lighting from the source frame in your `invariants` list. Those belong in `variation_axes`.
 
 Return ONLY valid JSON, no commentary, with this exact shape:
 {
-  "invariants": ["string", ...],          // composition, layout, object positions, camera framing
-  "variation_axes": [                     // axes you used to generate variations
-    {"name": "lighting", "options": ["...", "..."]},
+  "invariants": ["string", ...],          // ONLY geometry, object identity, motion, spatial relations, framing
+  "variation_axes": [                     // axes the 8 prompts span — must include floor and lighting
+    {"name": "floor", "options": ["...", "..."]},
     {"name": "environment", "options": ["...", "..."]},
-    {"name": "texture", "options": ["...", "..."]},
-    {"name": "color_palette", "options": ["...", "..."]}
+    {"name": "lighting", "options": ["...", "..."]},
+    {"name": "color_palette", "options": ["...", "..."]},
+    {"name": "texture", "options": ["...", "..."]}
   ],
   "prompts": ["...", "...", "...", "...", "...", "...", "...", "..."]  // exactly 8 prompts
 }
 
 Each prompt should:
-- Start by re-stating the unchanged composition in one short clause.
-- Then specify the lighting, environment/background, surface textures, and dominant colors for THAT variation.
+- Start by re-stating the invariants in one short clause (geometry / objects / motion / framing only).
+- Name a *concrete different floor*, environment, lighting setup, and palette for THAT variation. Do not reuse the source frame's floor / walls / lighting.
 - Be 1-3 sentences, concrete and visual. No bullet points inside the prompt.
-- Together the 8 prompts should be meaningfully different from each other across the listed axes.
+- Across the 8 prompts, the floors must all be different. The environments must all be different.
 """
 
 
@@ -513,6 +601,80 @@ async def decart_download(
     async with client.stream(
         "GET", f"{DECART_BASE}/jobs/{job_id}/content", headers=headers,
     ) as resp:
+        resp.raise_for_status()
+        with out_path.open("wb") as f:
+            async for chunk in resp.aiter_bytes():
+                f.write(chunk)
+
+
+# ----------------------------------------------------- Runway Aleph (gen4_aleph)
+# Aleph honors the input video's duration automatically — no `duration` param.
+# We pick a `ratio` from a fixed allowlist closest to the source aspect.
+
+RUNWAY_ALEPH_RATIOS = [
+    (1280, 720), (720, 1280), (1104, 832), (960, 960),
+    (832, 1104), (1584, 672), (848, 480), (640, 480),
+]
+
+
+def runway_pick_ratio(src_w: int, src_h: int) -> str:
+    target = src_w / src_h if src_h else 16 / 9
+    best = min(RUNWAY_ALEPH_RATIOS, key=lambda wh: abs(wh[0] / wh[1] - target))
+    return f"{best[0]}:{best[1]}"
+
+
+async def runway_upload(file_path: Path) -> str:
+    """Upload a local file via the SDK; return the ephemeral URI Runway will fetch."""
+    from runwayml import AsyncRunwayML
+    client = AsyncRunwayML()
+    upload = await client.uploads.create_ephemeral(file=file_path)
+    return upload.uri
+
+
+async def runway_submit(
+    video_uri: str, image_uri: str, prompt_text: str, ratio: str,
+) -> str:
+    from runwayml import AsyncRunwayML
+    client = AsyncRunwayML()
+    task = await client.video_to_video.create(
+        model="gen4_aleph",
+        video_uri=video_uri,
+        prompt_text=prompt_text or "stylistic reskin preserving motion and geometry",
+        references=[{"type": "image", "uri": image_uri}],
+        ratio=ratio,
+    )
+    return task.id
+
+
+async def runway_wait(task_id: str) -> list[str]:
+    """Poll until SUCCEEDED; return output URLs. Raises HTTPError on failure."""
+    from runwayml import AsyncRunwayML
+    client = AsyncRunwayML()
+    deadline = time.monotonic() + 30 * 60  # 30 min cap
+    while True:
+        task = await client.tasks.retrieve(task_id)
+        status = getattr(task, "status", None)
+        print(f"  runway {task_id[:8]} status={status}", flush=True)
+        if status == "SUCCEEDED":
+            outputs = list(getattr(task, "output", []) or [])
+            if not outputs:
+                raise HTTPError(f"runway {task_id} succeeded but no output URLs")
+            return outputs
+        if status in ("FAILED", "CANCELLED"):
+            raise HTTPError(
+                f"runway {task_id} {status}: "
+                f"{getattr(task, 'failure', None) or getattr(task, 'failure_code', '')}"
+            )
+        if time.monotonic() > deadline:
+            raise HTTPError(f"runway timeout task={task_id}")
+        await asyncio.sleep(5)
+
+
+async def runway_download(
+    client: httpx.AsyncClient, url: str, out_path: Path,
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    async with client.stream("GET", url) as resp:
         resp.raise_for_status()
         with out_path.open("wb") as f:
             async for chunk in resp.aiter_bytes():
@@ -862,6 +1024,77 @@ async def stage_lucy_edit(
     return list(outs)
 
 
+# Aleph caps each generation at 5 seconds. We rely on the upstream segment
+# pipeline (SEG_TARGET_MAX) to keep segments at ≤5s, so a single Aleph call
+# covers the whole clip 1:1. The guard below fails loudly if that contract
+# is ever violated rather than silently truncating.
+RUNWAY_ALEPH_MAX_S = 5.0
+
+
+async def stage_runway_aleph(
+    client: httpx.AsyncClient, run_dir: Path, segment_mp4: Path,
+    image_paths: list[Path], prompts: list[str], src_w: int, src_h: int,
+) -> list[Path]:
+    seg_dur = ffprobe_duration(segment_mp4)
+    if seg_dur > RUNWAY_ALEPH_MAX_S + 0.1:
+        raise HTTPError(
+            f"runway: segment is {seg_dur:.2f}s but Aleph caps at "
+            f"{RUNWAY_ALEPH_MAX_S}s. Tighten SEG_TARGET_MAX in the "
+            f"segment pipeline."
+        )
+
+    rw_dir = run_dir / "05_runway"
+    rw_dir.mkdir(parents=True, exist_ok=True)
+    sem = asyncio.Semaphore(PARALLEL)
+    ratio = runway_pick_ratio(src_w, src_h)
+    print(f"[run]  05_runway: ratio={ratio}, {len(image_paths)} job(s), "
+          f"parallel={PARALLEL}", flush=True)
+
+    # Upload the segment once — same input across all variants.
+    seg_uri_path = rw_dir / "_segment_uri.json"
+    if seg_uri_path.exists():
+        segment_uri = read_json(seg_uri_path)["uri"]
+        print(f"  [skip] segment upload: cached", flush=True)
+    else:
+        print(f"  [run]  uploading segment.mp4...", flush=True)
+        segment_uri = await runway_upload(segment_mp4)
+        write_json(seg_uri_path, {"uri": segment_uri})
+
+    async def one(idx: int, image_path: Path, prompt_text: str) -> Path:
+        sub = rw_dir / f"var_{idx:02d}"
+        sub.mkdir(parents=True, exist_ok=True)
+        submit_path = sub / "submit.json"
+        poll_path = sub / "poll.json"
+        out_mp4 = sub / "output.mp4"
+        if out_mp4.exists():
+            print(f"  [skip] runway var_{idx:02d}: output present", flush=True)
+            return out_mp4
+        async with sem:
+            if submit_path.exists():
+                submit = read_json(submit_path)
+                task_id = submit.get("task_id")
+            else:
+                print(f"  [run]  runway var_{idx:02d}: upload reference", flush=True)
+                image_uri = await runway_upload(image_path)
+                print(f"  [run]  runway var_{idx:02d}: submit", flush=True)
+                task_id = await runway_submit(segment_uri, image_uri, prompt_text, ratio)
+                write_json(submit_path, {"task_id": task_id, "image_uri": image_uri})
+            print(f"  [run]  runway var_{idx:02d}: poll {task_id[:8]}...", flush=True)
+            outputs = await runway_wait(task_id)
+            write_json(poll_path, {"output_urls": outputs})
+            print(f"  [run]  runway var_{idx:02d}: download", flush=True)
+            await runway_download(client, outputs[0], out_mp4)
+        print(f"  [done] runway var_{idx:02d}: {out_mp4.name}", flush=True)
+        return out_mp4
+
+    outs = await asyncio.gather(
+        *(one(i + 1, p, pr) for i, (p, pr) in enumerate(zip(image_paths, prompts))),
+        return_exceptions=False,
+    )
+    print(f"[done] 05_runway: {len(outs)} output video(s)", flush=True)
+    return list(outs)
+
+
 # ------------------------------------------------------------------- main
 
 def make_run_dir(input_path: Path) -> Path:
@@ -876,21 +1109,19 @@ async def main_async(args: argparse.Namespace) -> None:
     load_dotenv(PROJ / ".env")
     or_key = os.environ.get("OPENROUTER_API_KEY")
     tl_key = os.environ.get("TWELVELABS_API_KEY")
-    dc_key = os.environ.get("DECART_API_KEY")
-    missing = [n for n, v in [
+    missing_core = [n for n, v in [
         ("OPENROUTER_API_KEY", or_key),
         ("TWELVELABS_API_KEY", tl_key),
-        ("DECART_API_KEY", dc_key),
     ] if not v]
-    if missing:
-        raise SystemExit(f"missing keys in .env: {', '.join(missing)}")
+    if missing_core:
+        raise SystemExit(f"missing keys in .env: {', '.join(missing_core)}")
 
     if args.run_dir:
         run_dir = Path(args.run_dir).resolve()
         if not run_dir.exists():
             raise SystemExit(f"run dir does not exist: {run_dir}")
-        meta = run_dir / "00_input" / "metadata.json"
-        if not meta.exists():
+        meta_path = run_dir / "00_input" / "metadata.json"
+        if not meta_path.exists():
             raise SystemExit(f"run dir missing 00_input/metadata.json: {run_dir}")
         src = run_dir / "00_input" / "source.mp4"
     elif args.input:
@@ -902,7 +1133,22 @@ async def main_async(args: argparse.Namespace) -> None:
     else:
         raise SystemExit("provide --input <clip> or --run-dir <existing>")
 
-    print(f"\n=== run dir: {run_dir} ===\n", flush=True)
+    # Render model: lucy (default, Decart) or runway (gen4_aleph). Stored in
+    # 00_input/metadata.json by the webapp at run creation; defaults to lucy
+    # for older runs / direct CLI invocations.
+    meta = read_json(run_dir / "00_input" / "metadata.json") or {}
+    model = (meta.get("model") or "lucy").lower()
+    if model not in ("lucy", "runway"):
+        raise SystemExit(f"unknown model in metadata: {model}")
+    if model == "lucy":
+        dc_key = os.environ.get("DECART_API_KEY")
+        if not dc_key:
+            raise SystemExit("missing DECART_API_KEY (required for model=lucy)")
+    else:
+        if not os.environ.get("RUNWAYML_API_SECRET"):
+            raise SystemExit("missing RUNWAYML_API_SECRET (required for model=runway)")
+
+    print(f"\n=== run dir: {run_dir}  ·  model={model} ===\n", flush=True)
 
     timeout = httpx.Timeout(connect=30.0, read=300.0, write=300.0, pool=30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -917,9 +1163,19 @@ async def main_async(args: argparse.Namespace) -> None:
         image_paths = await stage_image_variations(
             client, run_dir, first_png, approved, count, or_key,
         )
-        outputs = await stage_lucy_edit(client, run_dir, seg_mp4, image_paths, dc_key)
+        if model == "lucy":
+            outputs = await stage_lucy_edit(
+                client, run_dir, seg_mp4, image_paths, dc_key,
+            )
+            out_dir = run_dir / "05_lucy_edit"
+        else:
+            outputs = await stage_runway_aleph(
+                client, run_dir, seg_mp4, image_paths, approved,
+                int(meta.get("width") or 0), int(meta.get("height") or 0),
+            )
+            out_dir = run_dir / "05_runway"
 
-    print(f"\n=== done. {len(outputs)} output video(s) under {run_dir / '05_lucy_edit'} ===")
+    print(f"\n=== done. {len(outputs)} output video(s) under {out_dir} ===")
 
 
 def main() -> None:

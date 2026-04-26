@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ClawBlox · CSAIL Agentic AI Hackathon</title>
+  <title>RoboClaw · CSAIL Agentic AI Hackathon</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
@@ -14,10 +14,10 @@
         <span class="mc orange">C</span><span class="mc orange">S</span><span class="mc gold">A</span><span class="mc silver">I</span><span class="mc orange">L</span>
       </div>
       <div class="brand-sub">Agentic AI Hackathon · April 2026</div>
-      <div class="brand-tag">clawblox · the agents are running the show</div>
+      <div class="brand-tag">roboclaw · the agents are running the show</div>
     </div>
 
-    <button id="newRunBtn" class="btn primary block">+ summon a new agent</button>
+    <button id="newRunBtn" class="btn primary block">+ new run</button>
     <input type="file" id="fileInput" accept="video/*" hidden />
 
     <nav class="runs">
@@ -39,7 +39,7 @@
 
   <main class="main" id="main">
     <header class="topbar">
-      <div id="runTitle" class="run-title">Pick a run, or summon a new agent.</div>
+      <div id="runTitle" class="run-title">Pick a run, or start a new one.</div>
       <div class="run-status">
         <span id="runStatus"></span>
         <button id="fitBtn" class="btn ghost small" title="fit to screen">↔ fit</button>
@@ -56,10 +56,33 @@
           (or regenerate the boring ones), let GPT-5.4-image-2 paint, and Decart
           Lucy Edit 2.1 stitches it back into video. Many tiny employees, one
           conveyor belt.</p>
+        <div class="model-picker">
+          <div class="model-picker-label">choose render model</div>
+          <div class="model-picker-row">
+            <label class="model-card">
+              <input type="radio" name="runModel" value="lucy" checked />
+              <div class="model-card-body">
+                <div class="model-card-title">Lucy · Decart</div>
+                <div class="model-card-sub">Lucy Edit 2.1 — fast, established renderer</div>
+              </div>
+            </label>
+            <label class="model-card">
+              <input type="radio" name="runModel" value="runway" />
+              <div class="model-card-body">
+                <div class="model-card-title">Runway · Aleph</div>
+                <div class="model-card-sub">gen4_aleph — preserves motion, novel reskins</div>
+              </div>
+            </label>
+          </div>
+        </div>
         <label class="dropzone" id="dropzone">
           <strong>Drop a video here</strong>
           <span>or <button class="link" id="browseBtn">browse</button> · mp4 / mov / webm · ≥ 4 s</span>
         </label>
+        <div class="mode-toggle">
+          <label><input type="radio" name="runMode" value="manual" checked /> manual — I'll drive</label>
+          <label><input type="radio" name="runMode" value="agent" /> agent — let Claude drive</label>
+        </div>
         <div class="footnote muted">
           all stages cache; close the tab and come back, the agents remember.
         </div>
@@ -78,6 +101,11 @@
       <details class="logbox">
         <summary>pipeline.log (tail)</summary>
         <pre id="log"></pre>
+      </details>
+
+      <details class="logbox agent-logbox hidden" id="agentDecisionsBox">
+        <summary>agent reasoning · decisions</summary>
+        <pre id="agentDecisions"></pre>
       </details>
     </section>
 
