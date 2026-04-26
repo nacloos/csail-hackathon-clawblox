@@ -6,6 +6,8 @@ MUJOCO_LOG.TXT
 .env.*
 !.env.example
 runs/
+*.log
+recordings/
 
 # OS / editor
 **/.DS_Store

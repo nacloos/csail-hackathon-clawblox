@@ -47,7 +47,7 @@ WORLD_URL       = os.getenv("WORLD_URL", "http://localhost:8080")
 MODEL           = os.getenv("MODEL", "minimax-m2.7")
 BASE_URL        = "https://api.minimax.io/anthropic"
 API_KEY         = os.getenv("MINIMAX_API_KEY", "")
-MAX_TURNS       = 40
+MAX_TURNS       = 60
 AGENT_NAME      = "minimax-agent"
 THINKING_BUDGET = int(os.getenv("THINKING_BUDGET", "0"))  # 0 = off, >0 = on
 
@@ -147,6 +147,28 @@ TOOLS: list[dict] = [
         "name": "observe",
         "description": "Get current sim state: object positions, joint angles, touch sensors.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "pick_and_place",
+        "description": (
+            "Pick up an object and place it at a target position in one shot. "
+            "Handles the full sequence: approach, grasp, lift, move, lower, release. "
+            "from_x/y/z is the object centre position (from observe). "
+            "to_x/y is the target XY; to_z is the height of the surface to place on "
+            "(e.g. 0.0 for table, 0.07 for top of 1 block, 0.14 for top of 2 blocks)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "from_x": {"type": "number"},
+                "from_y": {"type": "number"},
+                "from_z": {"type": "number", "description": "object centre z (usually 0.035)"},
+                "to_x":   {"type": "number"},
+                "to_y":   {"type": "number"},
+                "to_z":   {"type": "number", "description": "surface z to place on (0.0=table, 0.07=1 block high, 0.14=2 blocks high)"},
+            },
+            "required": ["from_x", "from_y", "from_z", "to_x", "to_y", "to_z"],
+        },
     },
     {
         "name": "set_control",
@@ -307,9 +329,50 @@ def move_ee_to(target: list[float], gripper: float, sim: SimSession) -> str:
     )
 
 
+def pick_and_place(fx: float, fy: float, fz: float,
+                   tx: float, ty: float, tz: float,
+                   sim: SimSession) -> str:
+    """Full pick-and-place sequence in one call."""
+    LIFT_Z    = 0.30   # carry height
+    APPROACH  = 0.15   # hover height before lowering
+    GRASP_Z   = fz - 0.015   # fingertips just below object centre
+    PLACE_Z   = tz + 0.085   # fingertips just above surface (block half-size + gap)
+
+    steps = [
+        ([fx, fy, APPROACH], 255, "approach above"),
+        ([fx, fy, GRASP_Z],  255, "lower to grasp"),
+        ([fx, fy, GRASP_Z],  0,   "close gripper"),
+        ([fx, fy, LIFT_Z],   0,   "lift"),
+        ([tx, ty, LIFT_Z],   0,   "move over target"),
+        ([tx, ty, PLACE_Z],  0,   "lower to place"),
+        ([tx, ty, PLACE_Z],  255, "release"),
+        ([tx, ty, LIFT_Z],   255, "retract"),
+    ]
+    log.info("[pick_and_place] (%s,%s,%s) → (%s,%s,%s)", fx, fy, fz, tx, ty, tz)
+    for pos, gripper, label in steps:
+        result = move_ee_to(pos, gripper, sim)
+        log.info("  %s: %s", label, result)
+
+    # Verify object moved
+    obs = sim.observe()
+    for obj in obs.get("objects", []):
+        p = obj["position"]
+        dist = ((p[0]-tx)**2 + (p[1]-ty)**2) ** 0.5
+        if dist < 0.08:
+            return f"placed {obj['name']} at ({p[0]:.3f},{p[1]:.3f},{p[2]:.3f})"
+    return f"done — check observe() to confirm placement"
+
+
 def execute_tool(name: str, inputs: dict, sim: SimSession) -> str:
     if name == "observe":
         return fmt_obs(sim.observe())
+
+    if name == "pick_and_place":
+        return pick_and_place(
+            float(inputs["from_x"]), float(inputs["from_y"]), float(inputs["from_z"]),
+            float(inputs["to_x"]),   float(inputs["to_y"]),   float(inputs["to_z"]),
+            sim,
+        )
 
     if name == "move_ee":
         x = float(inputs.get("x", 0))
@@ -343,34 +406,30 @@ def build_system(sim: SimSession, api_doc: str) -> str:
 Your assigned robot: {sim.robot or "panda"}
 Your session: {sim.session_id}
 
-## Primary tool: move_ee
-Use move_ee(x, y, z, gripper) to move the fingertips to world position (x, y, z).
-The harness solves inverse kinematics automatically.
-- gripper=255 → open, gripper=0 → closed
-- z coordinates are fingertip heights. Table surface = z=0.0.
-- Blocks are cubes with half-size 0.035m: centre z=0.035, top z=0.07.
-- To grasp a block: fingertips at z=0.015 (just above table, around the block sides).
-- Lift to z=0.25 before moving sideways.
+## Primary tool: pick_and_place
+Use pick_and_place to move any object from one position to another in a single call.
+It handles the full sequence automatically: approach → grasp → lift → move → place → release.
 
-## Typical pick-and-place workflow
-1. observe() → note block position (bx, by, bz)
-2. move_ee(bx, by, 0.15, 255)   — approach above block, open
-3. move_ee(bx, by, 0.015, 255)  — lower fingers beside block
-4. move_ee(bx, by, 0.015, 0)    — close gripper around block
-5. move_ee(bx, by, 0.25, 0)     — lift
-6. move_ee(tx, ty, 0.25, 0)     — move over target
-7. move_ee(tx, ty, 0.085, 0)    — lower onto stack (1st block top = 0.07)
-8. move_ee(tx, ty, 0.085, 255)  — open gripper, release
-9. move_ee(tx, ty, 0.25, 255)   — retract
+Arguments:
+- from_x, from_y, from_z: object centre (get from observe())
+- to_x, to_y: target XY position
+- to_z: the surface z to place ON TOP OF:
+  - 0.0  = table surface  → places on table
+  - 0.07 = top of 1 block → stacks on 1st block
+  - 0.14 = top of 2 blocks → stacks on 2nd block
 
-## Stacking heights (fingertip z to release)
-- Place on table:        z=0.085  (block top at 0.07 + small gap)
-- Place on 1st block:    z=0.155  (top at 0.14)
-- Place on 2nd block:    z=0.225  (top at 0.21)
-Each block adds ~0.07m.
+## Typical stacking sequence (3 blocks)
+1. observe() → get block positions
+2. pick_and_place(red_x, red_y, 0.035, 0.5, 0.0, 0.0)    — put red on table as base
+3. pick_and_place(blue_x, blue_y, 0.035, 0.5, 0.0, 0.07)  — stack blue on red
+4. pick_and_place(green_x, green_y, 0.035, 0.5, 0.0, 0.14) — stack green on blue
+5. pick_and_place(brick_x, brick_y, 0.025, <stack_x>, <stack_y>, 0.0) — swing brick into stack
 
-## World layout (from observe)
-Table centre ~(0.4, 0.0). Arm reach: x 0.1–0.8, y ±0.5, z 0.0–0.9.
+## Use move_ee for fine adjustments
+move_ee(x, y, z, gripper) moves fingertips to exact world position if you need precise control.
+
+## World layout
+Table centre ~(0.4, 0.0). All blocks start at z=0.035 (centre).
 """
 
 
@@ -421,9 +480,11 @@ def run(task: str, model: str = MODEL, world_url: str = WORLD_URL,
                     log.info("[think] %s%s", snippet, "…" if len(block.thinking) > 200 else "")
                 elif hasattr(block, "text") and block.text:
                     log.info("[agent] %s", block.text)
+                    sim.chat(f"[agent] {block.text[:400]}")
                 elif block.type == "tool_use":
-                    log.info("[tool]  %s(%s)", block.name,
-                             json.dumps(block.input, separators=(',', ':')))
+                    tool_str = f"{block.name}({json.dumps(block.input, separators=(',', ':'))})"
+                    log.info("[tool]  %s", tool_str)
+                    sim.chat(f"[tool] {tool_str[:400]}")
 
             if resp.stop_reason == "end_turn":
                 final = next((b.text for b in resp.content if hasattr(b, "text")), "done")

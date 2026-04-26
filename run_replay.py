@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import textwrap
 from pathlib import Path
 import time
 
@@ -16,6 +18,28 @@ HOME = 268
 END = 269
 
 
+def load_agent_events(events_path: Path) -> list[tuple[int, str]]:
+    """Load [agent] and [tool] chat messages from the events jsonl, sorted by tick."""
+    events: list[tuple[int, str]] = []
+    if not events_path.exists():
+        return events
+    with events_path.open() as f:
+        for line in f:
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if ev.get("type") != "ChatMessage":
+                continue
+            content = ev.get("data", {}).get("content", "")
+            if not (content.startswith("[agent]") or content.startswith("[tool]")):
+                continue
+            tick = int(ev.get("tick", 0))
+            events.append((tick, content))
+    events.sort(key=lambda x: x[0])
+    return events
+
+
 class ReplayController:
     def __init__(
         self,
@@ -24,6 +48,7 @@ class ReplayController:
         speed: float = 1.0,
         paused: bool = False,
         loop: bool = True,
+        agent_events: list[tuple[int, str]] | None = None,
     ) -> None:
         self.reader = reader
         self.speed = max(0.1, speed)
@@ -33,6 +58,9 @@ class ReplayController:
         self.total_tick = reader.total_tick()
         self.last_wall_time = time.perf_counter()
         self.tick_rate = round(1.0 / reader.meta.timestep)
+        self.agent_events = agent_events or []
+        self._last_event_idx = 0
+        self._current_label = ""
 
     def key_callback(self, key: int) -> None:
         if key == ord(" "):
@@ -53,6 +81,13 @@ class ReplayController:
     def seek(self, tick: int) -> None:
         self.current_tick = min(max(0, tick), self.total_tick)
         self.last_wall_time = time.perf_counter()
+        # Rewind event pointer to match
+        self._last_event_idx = 0
+        for i, (ev_tick, _) in enumerate(self.agent_events):
+            if ev_tick <= self.current_tick:
+                self._last_event_idx = i
+            else:
+                break
 
     def advance(self) -> None:
         now = time.perf_counter()
@@ -63,11 +98,22 @@ class ReplayController:
         if self.current_tick >= self.total_tick:
             if self.loop:
                 self.current_tick = 0
+                self._last_event_idx = 0
             return
         self.current_tick = min(
             self.total_tick,
             self.current_tick + round(elapsed * self.tick_rate * self.speed),
         )
+        # Fire any agent events that just became current
+        while (self._last_event_idx < len(self.agent_events) and
+               self.agent_events[self._last_event_idx][0] <= self.current_tick):
+            _, msg = self.agent_events[self._last_event_idx]
+            self._current_label = msg
+            # Print with wrapping so it's readable in terminal
+            label = msg.replace("[agent] ", "🤖 ").replace("[tool] ", "🔧 ")
+            wrapped = textwrap.fill(label, width=80)
+            print(f"\n{wrapped}")
+            self._last_event_idx += 1
 
     def apply_preview(self, data: mujoco.MjData) -> int:
         frame = self.reader.preview_at_tick(self.current_tick)
@@ -125,10 +171,16 @@ def main() -> None:
         scene = args.scene or reader.meta.scene_path
         model = mujoco.MjModel.from_xml_path(str(scene))
         data = mujoco.MjData(model)
-        controller = ReplayController(reader, speed=args.speed, paused=args.paused, loop=not args.no_loop)
+        agent_events = load_agent_events(reader.meta.events_path)
+        controller = ReplayController(
+            reader, speed=args.speed, paused=args.paused, loop=not args.no_loop,
+            agent_events=agent_events,
+        )
 
         print(f"Replaying: {args.recording}")
-        print("Keys: space play/pause, arrows seek, home/end jump, [/] speed")
+        if agent_events:
+            print(f"Loaded {len(agent_events)} agent events")
+        print("Keys: space play/pause, arrows seek, home/end jump, [/] speed\n")
         with mujoco.viewer.launch_passive(model, data, key_callback=controller.key_callback) as viewer:
             controller.last_wall_time = time.perf_counter()
             while viewer.is_running():
@@ -137,8 +189,9 @@ def main() -> None:
                 viewer.sync()
                 print(
                     f"\rtick={frame_tick}/{controller.total_tick} "
-                    f"speed={controller.speed:.2f} "
-                    f"{'paused' if controller.paused else 'playing'}",
+                    f"t={data.time:.1f}s  "
+                    f"speed={controller.speed:.1f}x  "
+                    f"{'⏸ paused' if controller.paused else '▶ playing'}   ",
                     end="",
                     flush=True,
                 )
