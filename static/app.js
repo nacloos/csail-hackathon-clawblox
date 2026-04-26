@@ -92,6 +92,14 @@ async function selectRun(name) {
   setTimeout(fitToScreen, 50);
   startPolling();
 }
+function showNewRunForm() {
+  state.active = null;
+  if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+  $("#run").classList.add("hidden");
+  $("#empty").classList.remove("hidden");
+  closeDrawer();
+  renderRuns();
+}
 function startPolling() {
   if (state.pollTimer) clearInterval(state.pollTimer);
   state.pollTimer = setInterval(refreshDetail, 2500);
@@ -105,12 +113,48 @@ async function refreshDetail() {
   refreshRuns().catch(() => {});
 }
 
+function modelPill(d) {
+  const label = d.model === "runway" ? "runway · aleph" : "lucy · decart";
+  return el("span", { class: "pill model", title: "render model" }, [label]);
+}
+
+function agentButton(d) {
+  const running = !!d.agent_running;
+  const isAgentMode = d.mode === "agent";
+  const btn = el("button", {
+    class: `btn small ${running ? "warn" : "ghost"}`,
+    title: running
+      ? "stop the agent (you take over manual control)"
+      : (isAgentMode ? "agent flag is set — relaunch agent" : "let Claude drive this run"),
+  }, [running ? "dismiss agent" : (isAgentMode ? "relaunch agent" : "summon agent")]);
+  btn.onclick = async (e) => {
+    e.preventDefault();
+    btn.disabled = true;
+    const path = running ? "dismiss-agent" : "summon-agent";
+    try {
+      await api("POST", `/api/runs/${d.name}/${path}`);
+      await refreshDetail();
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  return btn;
+}
+
 function statusPill(d) {
   const k = (text, kind) => el("span", { class: `pill ${kind || ""}` }, [text]);
-  if (d.running) return k("agents working", "teal");
-  if (d.gate === "pick-segment")    return k("pick a scene, human", "gold");
-  if (d.gate === "choose-count")    return k("how many clones?", "gold");
-  if (d.gate === "approve-prompts") return k("sign off on the prompts", "gold");
+  const isAgent = d.mode === "agent";
+  if (d.running) return k(isAgent ? "agent driving · stage running" : "stage running", "teal");
+  if (d.gate === "start")
+    return k(isAgent ? "agent starting…" : "ready · confirm & start", isAgent ? "teal" : "gold");
+  if (d.gate === "pick-segment")
+    return k(isAgent ? "agent picking a scene…" : "pick a scene, human", isAgent ? "teal" : "gold");
+  if (d.gate === "choose-count")
+    return k(isAgent ? "agent choosing count…" : "how many clones?", isAgent ? "teal" : "gold");
+  if (d.gate === "approve-prompts")
+    return k(isAgent ? "agent vetting prompts…" : "sign off on the prompts", isAgent ? "teal" : "gold");
   const total = d.outputs?.length || 0;
   const done  = (d.outputs || []).filter(o => o.video).length;
   if (total > 0 && done === total) return k("shipped", "green");
@@ -177,20 +221,56 @@ function sourceNode(d) {
 
 function pegasusNode(d) {
   const ready = !!d.segments;
+  if (ready) {
+    return {
+      kind: "display",
+      title: "02 · Pegasus 1.5",
+      state: "done",
+      body: [
+        el("div", { class: "kv" }, [
+          el("b", {}, [String(d.segments.length)]), " segments detected",
+        ]),
+        el("div", { class: "muted", style: "font-size:11.5px" }, [
+          "scenes by setting / action / framing",
+        ]),
+      ],
+    };
+  }
+  // Pre-start gate: clip uploaded but pipeline not yet kicked.
+  if (d.gate === "start") {
+    const agentMode = d.mode === "agent";
+    const modelLabel = (d.model === "runway") ? "Runway · Aleph" : "Lucy · Decart";
+    return {
+      kind: "choice-inline",
+      title: "02 · Pegasus 1.5",
+      state: "gate",
+      body: [
+        el("div", { class: "muted", style: "font-size:11.5px;margin-bottom:8px" },
+          [agentMode
+            ? "agent will start the pipeline shortly…"
+            : `ready · will render with ${modelLabel}`]),
+        el("button", {
+          class: "btn primary block",
+          disabled: agentMode ? "" : null,
+          onclick: async (e) => {
+            e.stopPropagation();
+            if (agentMode) return;
+            try {
+              await api("POST", `/api/runs/${d.name}/start`);
+              await refreshDetail();
+            } catch (err) { alert(err.message); }
+          },
+        }, [agentMode
+          ? "agent will send →"
+          : "send to TwelveLabs →"]),
+      ],
+    };
+  }
   return {
     kind: "display",
     title: "02 · Pegasus 1.5",
-    state: ready ? "done" : (d.input ? (d.running ? "running" : "running") : "locked"),
-    body: ready
-      ? [
-          el("div", { class: "kv" }, [
-            el("b", {}, [String(d.segments.length)]), " segments detected",
-          ]),
-          el("div", { class: "muted", style: "font-size:11.5px" }, [
-            "scenes by setting / action / framing",
-          ]),
-        ]
-      : [el("div", { class: "muted" }, ["uploading + segmenting…"])],
+    state: d.input ? "running" : "locked",
+    body: [el("div", { class: "muted" }, ["segmenting…"])],
   };
 }
 
@@ -258,19 +338,23 @@ function countNode(d) {
     return { kind: "display", title: "05 · How many?", state: "locked",
       body: [el("div", { class: "muted" }, ["unlocks after analysis."])] };
   const st = d.count ? "done" : "gate";
+  const agentLocked = d.mode === "agent" && !d.count;
   return {
     kind: "choice-inline",
     title: "05 · How many variations?",
     state: st,
     body: [
       el("div", { class: "muted", style: "font-size:11px" },
-        [d.count ? `chose ${d.count}` : "click to commit"]),
+        [d.count
+          ? `chose ${d.count}`
+          : (agentLocked ? "agent will choose…" : "click to commit")]),
       el("div", { class: "node-chips" },
         [1, 3, 8].map(n => el("button", {
-          class: d.count === n ? "selected" : "",
+          class: (d.count === n ? "selected " : "") + (agentLocked ? "locked" : ""),
+          disabled: agentLocked ? "" : null,
           onclick: async (e) => {
             e.stopPropagation();
-            if (d.count) return;
+            if (d.count || agentLocked) return;
             try {
               await api("POST", `/api/runs/${d.name}/count`, { n });
               await refreshDetail();
@@ -332,22 +416,32 @@ function imageNode(d, idx) {
 
 function lucyNode(d, idx) {
   const v = (d.outputs || []).find(x => x.index === idx);
+  const variation = (d.variations || []).find(x => x.index === idx);
   const ready = v && v.video;
   let st;
   if (ready) st = "done";
   else if (!d.approved_prompts && !d.count) st = "locked";
   else st = "running";
+  const thumb = el("div", {
+    class: "node-thumb square" + (ready ? " playable" : ""),
+    title: ready ? "click to watch" : "",
+    onclick: ready ? (e) => { e.stopPropagation(); openDrawer(`output:${idx}`); } : null,
+  }, [
+    ready
+      ? (variation && variation.image
+          ? el("img", { src: variation.image, loading: "lazy" })
+          : el("div", { class: "video-fallback" }, ["▶ click to watch"]))
+      : el("span", { class: "spinner" }),
+    ready ? el("div", { class: "play-overlay" }, ["▶"]) : null,
+  ]);
   return {
     kind: "display",
-    title: `08 · lucy ${String(idx).padStart(2, "0")}`,
+    title: `08 · ${d.model === "runway" ? "runway" : "lucy"} ${String(idx).padStart(2, "0")}`,
     state: st,
     body: [
-      el("div", { class: "node-thumb square" }, [
-        ready ? el("video", { src: v.video, controls: "", muted: "", loop: "", playsinline: "" })
-              : el("span", { class: "spinner" }),
-      ]),
+      thumb,
       el("div", { class: "muted", style: "font-size:11.5px" },
-        [ready ? "shipped" : (v?.status || "queued")]),
+        [ready ? "click to watch" : (v?.status || "queued")]),
     ],
   };
 }
@@ -359,7 +453,9 @@ function renderCanvas() {
   $("#runTitle").textContent = d.name;
   const rs = $("#runStatus");
   rs.innerHTML = "";
+  rs.appendChild(modelPill(d));
   rs.appendChild(statusPill(d));
+  rs.appendChild(agentButton(d));
 
   const graph = buildGraph(d);
   const nodesLayer = $("#nodes");
@@ -416,6 +512,18 @@ function renderCanvas() {
 
   applyTransform();
   $("#log").textContent = d.log_tail || "(no log yet)";
+
+  // Agent reasoning panel — only visible for agent-driven runs.
+  const agentSeen = d.mode === "agent" || (d.agent_decisions && d.agent_decisions.trim());
+  const decBox = $("#agentDecisionsBox");
+  if (agentSeen) {
+    decBox.classList.remove("hidden");
+    $("#agentDecisions").textContent = d.agent_decisions && d.agent_decisions.trim()
+      ? d.agent_decisions
+      : "(no decisions logged yet — agent will append one line per decision here)";
+  } else {
+    decBox.classList.add("hidden");
+  }
 }
 
 function nodeBadge(n) {
@@ -498,6 +606,7 @@ function openDrawer(kind) {
   $("#drawerScrim").classList.remove("hidden");
   if (kind === "segments") drawerSegments(d);
   else if (kind === "approve") drawerApprove(d);
+  else if (kind.startsWith("output:")) drawerOutput(d, parseInt(kind.slice(7), 10));
 }
 function closeDrawer() {
   state.drawer = null;
@@ -536,24 +645,54 @@ function drawerSegments(d) {
     ]));
   }
 
+  const agentMode = d.mode === "agent";
+  const locked = agentMode || !!d.chosen;
+  const pickSegment = async (i) => {
+    try {
+      await api("POST", `/api/runs/${d.name}/pick-segment`, { index: i });
+      closeDrawer();
+      await refreshDetail();
+    } catch (e) { alert(e.message); }
+  };
   body.appendChild(el("div", { class: "seg-grid" },
     d.segments.map((s, i) => {
       const dur = s.end_time - s.start_time;
-      const tile = el("div", {
-        class: "seg-tile" + (i === chosenIdx ? " selected" : ""),
-        onclick: async () => {
-          if (d.chosen) return;
-          try {
-            await api("POST", `/api/runs/${d.name}/pick-segment`, { index: i });
-            closeDrawer();
-            await refreshDetail();
-          } catch (e) { alert(e.message); }
+      const previewSrc = d.source_video
+        ? `${d.source_video}#t=${s.start_time.toFixed(2)},${s.end_time.toFixed(2)}`
+        : null;
+      const isChosen = i === chosenIdx;
+      const pickBtn = el("button", {
+        class: `btn small ${isChosen ? "primary" : "primary"}`,
+        disabled: locked ? "" : null,
+        onclick: (ev) => {
+          ev.stopPropagation();
+          if (locked) return;
+          pickSegment(i);
         },
       }, [
+        isChosen ? "✓ chosen" :
+          (agentMode ? "agent will pick" :
+            (d.chosen ? "locked" : "use this segment →")),
+      ]);
+      const tile = el("div", {
+        class: "seg-tile" + (isChosen ? " selected" : "")
+          + (locked ? " locked" : ""),
+      }, [
+        previewSrc
+          ? el("video", {
+              class: "seg-preview",
+              src: previewSrc,
+              controls: "",
+              muted: "",
+              preload: "metadata",
+              playsinline: "",
+            })
+          : null,
         el("div", { class: "seg-time" },
           [`${fmtSecs(s.start_time)}–${fmtSecs(s.end_time)}  ·  ${dur.toFixed(2)}s`]),
         el("div", { class: "seg-title" }, [s.title || "(untitled)"]),
         s.description ? el("div", { class: "seg-desc" }, [s.description]) : null,
+        el("div", { class: "seg-actions" }, [pickBtn]),
       ]);
       return tile;
     })
@@ -569,6 +708,8 @@ function drawerApprove(d) {
     return;
   }
   const approved = !!d.approved_prompts;
+  const agentLocked = d.mode === "agent" && !approved;
+  const readOnly = approved || agentLocked;
   const initial = d.approved_prompts || d.analysis.prompts.slice(0, d.count);
 
   if (!approved && state.workingPrompts == null) {
@@ -583,15 +724,20 @@ function drawerApprove(d) {
   }
   const live = approved ? initial : (state.workingPrompts || initial);
 
+  if (agentLocked) {
+    body.appendChild(el("div", { class: "muted", style: "margin-bottom:10px;font-size:12px" },
+      ["agent is reviewing these prompts. dismiss the agent to take over."]));
+  }
+
   const list = el("div", { class: "prompts" }, live.map((text, i) => {
     const ta = el("textarea", { rows: "3" }, [text || ""]);
     ta.value = text || "";
-    ta.disabled = approved;
+    ta.disabled = readOnly;
     ta.addEventListener("input", () => {
       if (!state.workingPrompts) state.workingPrompts = live.slice();
       state.workingPrompts[i] = ta.value;
     });
-    const acts = approved ? el("div") : el("div", { class: "actions" }, [
+    const acts = readOnly ? el("div") : el("div", { class: "actions" }, [
       el("button", {
         class: "btn small ghost",
         onclick: async () => {
@@ -622,7 +768,7 @@ function drawerApprove(d) {
   }));
   body.appendChild(list);
 
-  if (!approved) {
+  if (!readOnly) {
     body.appendChild(el("div", { class: "approval-bar", style: "margin-top:14px" }, [
       el("button", { class: "btn warn",
         onclick: async () => {
@@ -656,6 +802,40 @@ function drawerApprove(d) {
   }
 }
 
+function drawerOutput(d, idx) {
+  $("#drawerTitle").textContent = `Output ${String(idx).padStart(2, "0")}`;
+  const body = $("#drawerBody");
+  body.innerHTML = "";
+  const v = (d.outputs || []).find(x => x.index === idx);
+  const variation = (d.variations || []).find(x => x.index === idx);
+  if (!v || !v.video) {
+    body.appendChild(el("div", { class: "muted" },
+      [`output ${idx} not ready (${v?.status || "queued"})`]));
+    return;
+  }
+  body.appendChild(el("video", {
+    class: "output-player",
+    src: v.video,
+    controls: "",
+    autoplay: "",
+    loop: "",
+    playsinline: "",
+  }));
+  if (variation && variation.prompt) {
+    body.appendChild(el("div", { class: "output-prompt" }, [
+      el("div", { class: "muted",
+        style: "font-size:11.5px;letter-spacing:.4px;text-transform:uppercase;margin-bottom:6px" },
+        ["prompt"]),
+      el("div", {}, [variation.prompt]),
+    ]));
+  }
+  const links = el("div", { class: "output-links" }, [
+    el("a", { href: v.video, download: `${d.name}_${String(idx).padStart(2,"0")}.mp4` },
+      ["download mp4"]),
+  ]);
+  body.appendChild(links);
+}
+
 function bindDrawer() {
   $("#drawerClose").onclick = closeDrawer;
   $("#drawerScrim").onclick = closeDrawer;
@@ -670,7 +850,7 @@ function bindUpload() {
   const drop = $("#dropzone");
   const newBtn = $("#newRunBtn");
   const browse = $("#browseBtn");
-  newBtn.onclick = () => input.click();
+  newBtn.onclick = () => showNewRunForm();
   browse.onclick = (e) => { e.preventDefault(); input.click(); };
   input.onchange = () => { if (input.files[0]) uploadFile(input.files[0]); };
   drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("drag"); });
@@ -681,7 +861,12 @@ function bindUpload() {
   });
 }
 async function uploadFile(file) {
-  const fd = new FormData(); fd.append("file", file);
+  const fd = new FormData();
+  fd.append("file", file);
+  const modeEl = document.querySelector('input[name="runMode"]:checked');
+  fd.append("mode", modeEl ? modeEl.value : "manual");
+  const modelEl = document.querySelector('input[name="runModel"]:checked');
+  fd.append("model", modelEl ? modelEl.value : "lucy");
   $("#newRunBtn").disabled = true;
   $("#newRunBtn").textContent = "uploading…";
   try {
@@ -691,7 +876,7 @@ async function uploadFile(file) {
   } catch (e) { alert(e.message); }
   finally {
     $("#newRunBtn").disabled = false;
-    $("#newRunBtn").textContent = "+ summon a new agent";
+    $("#newRunBtn").textContent = "+ new run";
   }
 }
 
@@ -701,7 +886,9 @@ async function init() {
   bindCanvasInteractions();
   bindDrawer();
   await refreshRuns();
-  if (state.runs.length > 0) selectRun(state.runs[0].name);
-  else setInterval(refreshRuns, 4000);
+  // Default landing: the new-run screen so the model + mode choice is visible.
+  // The user can pick an existing run from the sidebar at any time.
+  showNewRunForm();
+  setInterval(refreshRuns, 4000);
 }
 init();
