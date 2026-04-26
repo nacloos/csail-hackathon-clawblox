@@ -481,15 +481,21 @@ class SimState:
         return session
 
     def robots_locked(self) -> list[dict[str, Any]]:
-        return [
-            {
+        result = []
+        for arm in self.arms:
+            entry: dict[str, Any] = {
                 "name": arm.name,
                 "control_indices": list(arm.actuator_ids),
                 "ctrl": [float(self.data.ctrl[actuator_id]) for actuator_id in arm.actuator_ids],
                 "assigned": any(session.robot == arm.name for session in self.sessions.values()),
             }
-            for arm in self.arms
-        ]
+            # Add end-effector world position from the "hand" body
+            hand_body_name = f"{arm.prefix}hand" if arm.prefix else "hand"
+            hand_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, hand_body_name)
+            if hand_body_id >= 0:
+                entry["ee_pos"] = self.data.xpos[hand_body_id].tolist()
+            result.append(entry)
+        return result
 
     def session_payload(self, session: Session) -> dict[str, Any]:
         payload = {
