@@ -12,7 +12,7 @@ RUN_PREFIX="${RUN_PREFIX:-$EXPERIMENT_ID}"
 TMUX_PREFIX="${TMUX_PREFIX:-clawblox-gen-claude}"
 RUN_PREFIX_EXPLICIT=0
 TMUX_PREFIX_EXPLICIT=0
-WORLD_DIR="${WORLD_DIR:-worlds/mesa-world}"
+WORLD_DIR="${WORLD_DIR:-worlds/mujoco-panda}"
 BASE_PORT="${BASE_PORT:-8085}"
 AGENTS_PER_WORLD="${AGENTS_PER_WORLD:-1}"
 RECORD="${RECORD:-true}"
@@ -29,7 +29,7 @@ AGENT_NAME_PREFIX="${AGENT_NAME_PREFIX:-agent}"
 GOAL="${GOAL:-}"
 INITIAL_TEMPLATE="${INITIAL_TEMPLATE:-}"
 SYSTEM_PROMPT_TEMPLATE="${SYSTEM_PROMPT_TEMPLATE:-}"
-WORLD_SERVER_CMD="${WORLD_SERVER_CMD:-uv run --with mujoco --with fastapi --with uvicorn python server.py}"
+WORLD_SERVER_CMD="${WORLD_SERVER_CMD:-uv run python server.py}"
 CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-6}"
 CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 CLAUDE_BARE="${CLAUDE_BARE:-0}"
@@ -38,7 +38,10 @@ CLAUDE_USE_ENV_AUTH="${CLAUDE_USE_ENV_AUTH:-0}"
 SANDBOX="${SANDBOX:-0}"
 CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-1800}"
 KEEP_WORLD="${KEEP_WORLD:-0}"
+SANDBOX_DEPS_ROOT="${SANDBOX_DEPS_ROOT:-}"
+SANDBOX_PYTHONPATH="${SANDBOX_PYTHONPATH:-}"
 declare -a CURRENT_TEMPLATES=()
+declare -a WORKSPACE_COPIES=()
 
 sanitize_name() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
@@ -438,6 +441,9 @@ Options:
   --claude-extra-args TEXT      Extra Claude CLI args forwarded to launch_multi_claude.sh
   --use-env-auth                Forward auth from env to launch_multi_claude.sh
   --sandbox                     Enable sandbox mode in launch_multi_claude.sh
+  --workspace-copy SRC[:DEST]   Seed each agent workspace; repeatable
+  --sandbox-deps-root PATH      Dependency prefix mounted inside sandbox at /sandbox-deps
+  --sandbox-pythonpath PATHS    PYTHONPATH value used inside sandbox
   --checkpoint-interval N       Forwarded to launch_multi_claude.sh
   --keep-world                  Keep one world/tmux session alive and reset only Claude between generations
   --template PATH               Initial template directory for generation 1
@@ -454,7 +460,8 @@ Environment overrides:
   SAVE_PROMPT, AGENT_NAME_PREFIX, GOAL, INITIAL_TEMPLATE, SYSTEM_PROMPT_TEMPLATE,
   WORLD_SERVER_CMD, CLAUDE_MODEL, CLAUDE_PERMISSION_MODE, CLAUDE_BARE, KEEP_WORLD,
   CLAUDE_EXTRA_ARGS, CLAUDE_USE_ENV_AUTH, CLAUDE_CODE_OAUTH_TOKEN,
-  CLAWBLOX_ENV_FILE, SANDBOX, CHECKPOINT_INTERVAL
+  CLAWBLOX_ENV_FILE, SANDBOX, CHECKPOINT_INTERVAL, SANDBOX_DEPS_ROOT,
+  SANDBOX_PYTHONPATH
 EOF
 }
 
@@ -579,6 +586,21 @@ while [[ $# -gt 0 ]]; do
     --sandbox)
       SANDBOX=1
       shift
+      ;;
+    --workspace-copy)
+      require_value "$1" "${2:-}"
+      WORKSPACE_COPIES+=("$2")
+      shift 2
+      ;;
+    --sandbox-deps-root)
+      require_value "$1" "${2:-}"
+      SANDBOX_DEPS_ROOT="$2"
+      shift 2
+      ;;
+    --sandbox-pythonpath)
+      require_value "$1" "${2:-}"
+      SANDBOX_PYTHONPATH="$2"
+      shift 2
       ;;
     --checkpoint-interval)
       require_value "$1" "${2:-}"
@@ -988,6 +1010,15 @@ run_generation_once() {
   if [[ "$SANDBOX" == "1" ]]; then
     launch_cmd+=(--sandbox)
   fi
+  if [[ -n "$SANDBOX_DEPS_ROOT" ]]; then
+    launch_cmd+=(--sandbox-deps-root "$SANDBOX_DEPS_ROOT")
+  fi
+  if [[ -n "$SANDBOX_PYTHONPATH" ]]; then
+    launch_cmd+=(--sandbox-pythonpath "$SANDBOX_PYTHONPATH")
+  fi
+  for workspace_copy in "${WORKSPACE_COPIES[@]}"; do
+    launch_cmd+=(--workspace-copy "$workspace_copy")
+  done
   for ((idx = 0; idx < AGENTS_PER_WORLD; idx++)); do
     template_in="${template_inputs[$idx]:-}"
     if [[ -n "$template_in" ]]; then
@@ -1222,6 +1253,15 @@ run_persistent_world_generations() {
   if [[ "$SANDBOX" == "1" ]]; then
     launch_cmd+=(--sandbox)
   fi
+  if [[ -n "$SANDBOX_DEPS_ROOT" ]]; then
+    launch_cmd+=(--sandbox-deps-root "$SANDBOX_DEPS_ROOT")
+  fi
+  if [[ -n "$SANDBOX_PYTHONPATH" ]]; then
+    launch_cmd+=(--sandbox-pythonpath "$SANDBOX_PYTHONPATH")
+  fi
+  for workspace_copy in "${WORKSPACE_COPIES[@]}"; do
+    launch_cmd+=(--workspace-copy "$workspace_copy")
+  done
   for ((idx = 0; idx < AGENTS_PER_WORLD; idx++)); do
     template_in="${template_inputs[$idx]:-}"
     if [[ -n "$template_in" ]]; then

@@ -60,7 +60,9 @@ CLAWBLOX_CLAUDE_CODE_VERSION_PIN="${CLAWBLOX_CLAUDE_CODE_VERSION_PIN:-2.1.116}"
 SANDBOX="${SANDBOX:-0}"
 SKIP_SOUL="${SKIP_SOUL:-0}"
 WORLD_CAPABILITY_PROXY="${WORLD_CAPABILITY_PROXY:-auto}"
-WORLD_SERVER_CMD="${WORLD_SERVER_CMD:-uv run --with mujoco --with fastapi --with uvicorn python server.py}"
+WORLD_SERVER_CMD="${WORLD_SERVER_CMD:-uv run python server.py}"
+SANDBOX_DEPS_ROOT="${SANDBOX_DEPS_ROOT:-}"
+SANDBOX_PYTHONPATH="${SANDBOX_PYTHONPATH:-}"
 CLAUDE_FAILURE_IDLE_GRACE_SECONDS="${CLAUDE_FAILURE_IDLE_GRACE_SECONDS:-180}"
 CLAUDE_FAILURE_STALL_GRACE_SECONDS="${CLAUDE_FAILURE_STALL_GRACE_SECONDS:-300}"
 CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS="${CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS:-5}"
@@ -69,6 +71,7 @@ EXPECTED_LAUNCH_INSTANCE_ID="${CLAWBLOX_EXPECT_LAUNCH_INSTANCE_ID:-}"
 CURRENT_AUTO_TIMER_PID="${CLAWBLOX_AUTO_TIMER_PID:-}"
 AUTO_STOP_PID="${AUTO_STOP_PID:-}"
 declare -a AGENT_TEMPLATE_DIRS=()
+declare -a WORKSPACE_COPIES=()
 
 AGENT_SCRIPT="$SCRIPT_DIR/run_claude_agent.sh"
 WATCHDOG_SCRIPT="$SCRIPT_DIR/watch_claude_recovery.sh"
@@ -421,6 +424,9 @@ write_run_config() {
   SYSTEM_PROMPT_TEMPLATE="${SYSTEM_PROMPT_TEMPLATE:-}" \
   AGENT_NAME_PREFIX="$AGENT_NAME_PREFIX" \
   AGENT_TEMPLATE_DIRS_JOINED="$agent_template_dirs_joined" \
+  WORKSPACE_COPIES_JOINED="$(printf '%s\n' "${WORKSPACE_COPIES[@]}")" \
+  SANDBOX_DEPS_ROOT="$SANDBOX_DEPS_ROOT" \
+  SANDBOX_PYTHONPATH="$SANDBOX_PYTHONPATH" \
   DURATION="$DURATION" \
   RESET_EVERY="$RESET_EVERY" \
   CHECKPOINT_INTERVAL="$CHECKPOINT_INTERVAL" \
@@ -466,6 +472,11 @@ config = {
         "agent_template_dirs": [
             line for line in os.environ.get("AGENT_TEMPLATE_DIRS_JOINED", "").splitlines() if line
         ],
+        "workspace_copies": [
+            line for line in os.environ.get("WORKSPACE_COPIES_JOINED", "").splitlines() if line
+        ],
+        "sandbox_deps_root": os.environ.get("SANDBOX_DEPS_ROOT", ""),
+        "sandbox_pythonpath": os.environ.get("SANDBOX_PYTHONPATH", ""),
     },
     "session_cycling": {
         "duration": os.environ.get("DURATION", ""),
@@ -670,6 +681,9 @@ Launch a simulator world with Claude Code agents in tmux.
 Options include:
   --world-server-cmd CMD        Command used to start the simulator; --port is appended
   --skip-soul, --no-soul        Do not seed or append SOUL.md for Claude agents
+  --workspace-copy SRC[:DEST]   Seed each agent workspace with SRC at relative DEST
+  --sandbox-deps-root PATH      Read-only dependency prefix mounted at /sandbox-deps
+  --sandbox-pythonpath PATHS    PYTHONPATH value used inside sandbox
 EOF
 }
 
@@ -685,6 +699,57 @@ require_value() {
 
 is_nonnegative_int() { [[ "$1" =~ ^[0-9]+$ ]]; }
 is_positive_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
+
+workspace_copy_dest_is_safe() {
+  local dest="$1"
+  [[ -n "$dest" ]] || return 1
+  [[ "$dest" != /* ]] || return 1
+  [[ "$dest" != "." ]] || return 1
+  IFS='/' read -r -a dest_parts <<<"$dest"
+  local part
+  for part in "${dest_parts[@]}"; do
+    [[ -n "$part" && "$part" != "." && "$part" != ".." ]] || return 1
+  done
+}
+
+copy_workspace_seed() {
+  local spec="$1"
+  local workspace="$2"
+  local src="${spec%%:*}"
+  local dest=""
+  local src_abs dest_abs dest_parent
+
+  if [[ "$spec" == *:* ]]; then
+    dest="${spec#*:}"
+  else
+    dest="$(basename "$src")"
+  fi
+  if [[ -z "$src" ]]; then
+    echo "Error: --workspace-copy source is empty in '$spec'" >&2
+    exit 1
+  fi
+  if ! workspace_copy_dest_is_safe "$dest"; then
+    echo "Error: unsafe --workspace-copy destination '$dest' in '$spec'" >&2
+    exit 1
+  fi
+
+  src_abs="$src"
+  if [[ "$src_abs" != /* ]]; then
+    src_abs="$ROOT_DIR/$src_abs"
+  fi
+  if [[ ! -e "$src_abs" ]]; then
+    echo "Error: --workspace-copy source does not exist: $src_abs" >&2
+    exit 1
+  fi
+
+  dest_abs="$workspace/$dest"
+  if [[ -e "$dest_abs" ]]; then
+    return 0
+  fi
+  dest_parent="$(dirname "$dest_abs")"
+  mkdir -p "$dest_parent"
+  cp -a "$src_abs" "$dest_abs"
+}
 
 verify_recording_db() {
   local recording_file="$1"
@@ -959,6 +1024,9 @@ while [[ $# -gt 0 ]]; do
     --template|--template-dir) require_value "$1" "${2:-}"; TEMPLATE_DIR="$2"; shift 2 ;;
     --system-prompt) require_value "$1" "${2:-}"; SYSTEM_PROMPT_TEMPLATE="$2"; shift 2 ;;
     --agent-template) require_value "$1" "${2:-}"; AGENT_TEMPLATE_DIRS+=("$2"); shift 2 ;;
+    --workspace-copy) require_value "$1" "${2:-}"; WORKSPACE_COPIES+=("$2"); shift 2 ;;
+    --sandbox-deps-root) require_value "$1" "${2:-}"; SANDBOX_DEPS_ROOT="$2"; shift 2 ;;
+    --sandbox-pythonpath) require_value "$1" "${2:-}"; SANDBOX_PYTHONPATH="$2"; shift 2 ;;
     --results-root) require_value "$1" "${2:-}"; RESULTS_ROOT="$2"; shift 2 ;;
     --resume) require_value "$1" "${2:-}"; RESUME_PATH="$2"; shift 2 ;;
     --checkpoint-interval) require_value "$1" "${2:-}"; CHECKPOINT_INTERVAL="$2"; shift 2 ;;
@@ -1064,6 +1132,28 @@ fi
 if [[ ! -d "$WORLD_ABS_DIR" ]]; then
   echo "Error: world directory not found at $WORLD_ABS_DIR"
   exit 1
+fi
+
+if [[ "$SANDBOX" == "1" && "$WORLD_ABS_DIR" == "$ROOT_DIR/worlds/mujoco-panda" ]]; then
+  WORKSPACE_COPIES=(
+    "models/panda_cube:local_mujoco/models/panda_cube"
+    "models/franka_emika_panda:local_mujoco/models/franka_emika_panda"
+    "panda_setup.py:local_mujoco/panda_setup.py"
+    "${WORKSPACE_COPIES[@]}"
+  )
+  if [[ -d "$ROOT_DIR/.venv/lib/python3.12/site-packages" ]]; then
+    WORKSPACE_COPIES=(
+      ".venv/lib/python3.12/site-packages:local_mujoco/site-packages"
+      "${WORKSPACE_COPIES[@]}"
+    )
+    SANDBOX_PYTHONPATH="${SANDBOX_PYTHONPATH:-/workspace/local_mujoco/site-packages}"
+  fi
+  if [[ -z "$SANDBOX_DEPS_ROOT" && -e "$ROOT_DIR/.venv/bin/python" ]]; then
+    sandbox_python_real="$(readlink -f "$ROOT_DIR/.venv/bin/python" 2>/dev/null || true)"
+    if [[ -n "$sandbox_python_real" ]]; then
+      SANDBOX_DEPS_ROOT="$(cd "$(dirname "$sandbox_python_real")/.." && pwd -P)"
+    fi
+  fi
 fi
 
 TEMPLATE_ABS_DIR="$TEMPLATE_DIR"
@@ -1187,7 +1277,7 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
   fi
   if [[ "$RECORD" == "true" ]]; then
     tmux send-keys -t "${TMUX_SESSION}:world-$i" \
-      "cd '$ROOT_DIR' && $WORLD_SERVER_CMD --port $port 2>&1 | tee -a '$world_log'" Enter
+      "cd '$ROOT_DIR' && $WORLD_SERVER_CMD --port $port --record --record-dir '$world_record_dir' 2>&1 | tee -a '$world_log'" Enter
   else
     tmux send-keys -t "${TMUX_SESSION}:world-$i" \
       "cd '$ROOT_DIR' && $WORLD_SERVER_CMD --port $port 2>&1 | tee -a '$world_log'" Enter
@@ -1246,6 +1336,9 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
     agent_log_file="$agent_log_dir/agent.log"
     agent_world_session_file="$agent_dir/world_session.txt"
     mkdir -p "$agent_log_dir" "$agent_workspace" "$agent_runtime_dir"
+    for workspace_copy in "${WORKSPACE_COPIES[@]}"; do
+      copy_workspace_seed "$workspace_copy" "$agent_workspace"
+    done
 
     agent_template_abs_dir="$TEMPLATE_ABS_DIR"
     if ((j < ${#AGENT_TEMPLATE_ABS_DIRS[@]})); then
@@ -1261,6 +1354,12 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
     fi
     if [[ "$SKIP_SOUL" == "1" ]]; then
       template_env_prefix+="SKIP_SOUL=1 "
+    fi
+    if [[ -n "$SANDBOX_DEPS_ROOT" ]]; then
+      template_env_prefix+="SANDBOX_DEPS_ROOT=$(printf '%q' "$SANDBOX_DEPS_ROOT") "
+    fi
+    if [[ -n "$SANDBOX_PYTHONPATH" ]]; then
+      template_env_prefix+="SANDBOX_PYTHONPATH=$(printf '%q' "$SANDBOX_PYTHONPATH") "
     fi
     startup_env_prefix=""
     if [[ -n "$startup_instructions" ]]; then
