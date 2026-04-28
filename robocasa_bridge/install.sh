@@ -45,12 +45,9 @@ if [[ ! -f pyproject.toml ]]; then
 fi
 
 ROBOCASA_DIR="$REPO_ROOT/vendor/robocasa"
-if [[ ! -d "$ROBOCASA_DIR" ]]; then
-    red "vendor/robocasa missing — this repo expects robocasa to be vendored at $ROBOCASA_DIR."
-    exit 1
-fi
+ROBOCASA_REPO_URL="https://github.com/robocasa/robocasa.git"
 
-cyan "[1/4] checking prerequisites"
+cyan "[1/5] checking prerequisites"
 for cmd in git curl; do
     command -v "$cmd" >/dev/null || { red "missing prerequisite: $cmd"; exit 1; }
 done
@@ -61,11 +58,27 @@ if ! command -v uv >/dev/null; then
 fi
 green "  uv $(uv --version | awk '{print $2}') ok"
 
-cyan "[2/4] syncing Python deps (uv sync)"
+cyan "[2/5] vendoring robocasa"
+if [[ -d "$ROBOCASA_DIR/.git" ]]; then
+    green "  vendor/robocasa already cloned, skipping"
+elif [[ -d "$ROBOCASA_DIR" ]]; then
+    # Directory exists without a .git — likely a partial/broken clone or a
+    # leftover from an earlier move. Bail rather than silently overwriting.
+    red "  $ROBOCASA_DIR exists but isn't a git checkout."
+    red "  Remove it (or restore the .git directory) and re-run."
+    exit 1
+else
+    mkdir -p "$REPO_ROOT/vendor"
+    yellow "  cloning $ROBOCASA_REPO_URL into vendor/robocasa"
+    git clone "$ROBOCASA_REPO_URL" "$ROBOCASA_DIR"
+    green "  clone complete"
+fi
+
+cyan "[3/5] syncing Python deps (uv sync)"
 uv sync
 green "  deps synced into .venv"
 
-cyan "[3/4] setting up robocasa macros"
+cyan "[4/5] setting up robocasa macros"
 MACROS_SRC="$ROBOCASA_DIR/robocasa/macros.py"
 MACROS_DST="$ROBOCASA_DIR/robocasa/macros_private.py"
 if [[ ! -f "$MACROS_SRC" ]]; then
@@ -79,7 +92,7 @@ else
     green "  created $MACROS_DST"
 fi
 
-cyan "[4/4] kitchen assets (~10 GB on first run)"
+cyan "[5/5] kitchen assets (~10 GB on first run)"
 TEX_DIR="$ROBOCASA_DIR/robocasa/models/assets/textures"
 OBJ_DIR="$ROBOCASA_DIR/robocasa/models/assets/objects/objaverse"
 assets_present=0
