@@ -1,0 +1,1 @@
+ bash launch_multi_generations_claude.sh --world-dir worlds/mujoco-panda --generations 10 --generation-duration 1h --base-port 8085 --sandbox

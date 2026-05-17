@@ -3,36 +3,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+AGENT_BACKEND="${AGENT_BACKEND:-claude}"
+AGENT_MODEL="${AGENT_MODEL:-}"
 
-load_claude_code_oauth_token_env() {
-  local env_file="${CLAWBLOX_ENV_FILE:-$ROOT_DIR/.env}"
-  local line value
-  if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" || ! -f "$env_file" ]]; then
-    return 0
-  fi
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?CLAUDE_CODE_OAUTH_TOKEN[[:space:]]*=[[:space:]]*(.*)$ ]]; then
-      value="${BASH_REMATCH[2]}"
-      value="${value%%#*}"
-      value="${value#"${value%%[![:space:]]*}"}"
-      value="${value%"${value##*[![:space:]]}"}"
-      if [[ "$value" == \"*\" && "$value" == *\" ]]; then
-        value="${value:1:${#value}-2}"
-      elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
-        value="${value:1:${#value}-2}"
-      fi
-      export CLAUDE_CODE_OAUTH_TOKEN="$value"
-      return 0
-    fi
-  done <"$env_file"
-}
-
-load_claude_code_oauth_token_env
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/agent_interface.sh"
 
 NUM_WORLDS="${NUM_WORLDS:-1}"
 AGENTS_PER_WORLD="${AGENTS_PER_WORLD:-1}"
 BASE_PORT="${BASE_PORT:-8080}"
-TMUX_SESSION="${TMUX_SESSION:-clawblox-claude}"
+TMUX_SESSION="${TMUX_SESSION:-}"
 RECORD="${RECORD:-true}"
 WORLD_DIR="${WORLD_DIR:-}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-30}"
@@ -50,33 +30,31 @@ DURATION="${DURATION:-}"
 CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-1800}"
 CHECKPOINT_WARNING_SECONDS="${CHECKPOINT_WARNING_SECONDS:-300}"
 CHECKPOINT_WARNING_PROMPT="${CHECKPOINT_WARNING_PROMPT:-You will be reset in 5 minutes. Update your workspace memory files now.}"
-CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-6}"
-CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
-CLAUDE_BARE="${CLAUDE_BARE:-0}"
-CLAUDE_EXTRA_ARGS="${CLAUDE_EXTRA_ARGS:-}"
-CLAUDE_USE_ENV_AUTH="${CLAUDE_USE_ENV_AUTH:-0}"
-CLAWBLOX_CLAUDE_BIN="${CLAWBLOX_CLAUDE_BIN:-}"
-CLAWBLOX_CLAUDE_CODE_VERSION_PIN="${CLAWBLOX_CLAUDE_CODE_VERSION_PIN:-2.1.116}"
 SANDBOX="${SANDBOX:-0}"
 SKIP_SOUL="${SKIP_SOUL:-0}"
 WORLD_CAPABILITY_PROXY="${WORLD_CAPABILITY_PROXY:-auto}"
 WORLD_SERVER_CMD="${WORLD_SERVER_CMD:-}"
 WORLD_SERVER_CWD=""
-CLAUDE_FAILURE_IDLE_GRACE_SECONDS="${CLAUDE_FAILURE_IDLE_GRACE_SECONDS:-180}"
-CLAUDE_FAILURE_STALL_GRACE_SECONDS="${CLAUDE_FAILURE_STALL_GRACE_SECONDS:-300}"
-CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS="${CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS:-5}"
 EXPECTED_RUN_ID="${CLAWBLOX_EXPECT_RUN_ID:-}"
 EXPECTED_LAUNCH_INSTANCE_ID="${CLAWBLOX_EXPECT_LAUNCH_INSTANCE_ID:-}"
 CURRENT_AUTO_TIMER_PID="${CLAWBLOX_AUTO_TIMER_PID:-}"
 AUTO_STOP_PID="${AUTO_STOP_PID:-}"
 declare -a AGENT_TEMPLATE_DIRS=()
+declare -a AGENT_HOOK_SPECS=()
 
-AGENT_SCRIPT="$SCRIPT_DIR/run_claude_agent.sh"
-WATCHDOG_SCRIPT="$SCRIPT_DIR/watch_claude_recovery.sh"
-if [[ ! -f "$AGENT_SCRIPT" ]]; then
-  echo "Error: Claude agent runner not found at $AGENT_SCRIPT"
-  exit 1
-fi
+prescan_args=("$@")
+for ((prescan_i = 0; prescan_i < ${#prescan_args[@]}; prescan_i++)); do
+  if [[ "${prescan_args[$prescan_i]}" == "--backend" ]]; then
+    if ((prescan_i + 1 >= ${#prescan_args[@]})) || [[ -z "${prescan_args[$((prescan_i + 1))]}" ]]; then
+      echo "Error: --backend requires a value." >&2
+      exit 1
+    fi
+    AGENT_BACKEND="${prescan_args[$((prescan_i + 1))]}"
+    break
+  fi
+done
+unset prescan_args prescan_i
+agent_load "$AGENT_BACKEND"
 
 parse_duration_seconds() {
   local input="$1"
@@ -160,79 +138,6 @@ append_launcher_audit() {
     "$details" >>"$audit_file"
 }
 
-write_agent_pane_command() {
-  local target="$1"
-  local root_dir="$2"
-  local auth_env_prefix="$3"
-  local world_url="$4"
-  local world_internal_url="$5"
-  local agent_display_name="$6"
-  local agent_dir="$7"
-  local agent_workspace="$8"
-  local session_id_file="$9"
-  local world_session_file="${10}"
-  local reset_every_seconds="${11}"
-  local duration_seconds="${12}"
-  local checkpoint_warning_seconds="${13}"
-  local checkpoint_warning_prompt="${14}"
-  local claude_model="${15}"
-  local claude_permission_mode="${16}"
-  local claude_bare="${17}"
-  local claude_extra_args="${18}"
-  local sandbox_env_prefix="${19}"
-  local template_env_prefix="${20}"
-  local startup_env_prefix="${21}"
-  local claude_bin="${22}"
-  local claude_code_version_pin="${23}"
-  local world_source_dir="${24}"
-
-  cat >"$target" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-cd $(printf '%q' "$root_dir")
-EOF
-  cat >>"$target" <<'EOF'
-refresh_afs_tokens() {
-  if [[ -z "${KRB5CCNAME:-}" ]] || ! command -v aklog >/dev/null 2>&1; then
-    return 0
-  fi
-  if ! aklog >/dev/null 2>&1; then
-    echo "Warning: aklog failed for KRB5CCNAME=$KRB5CCNAME; AFS paths may be unavailable." >&2
-  fi
-}
-refresh_afs_tokens
-EOF
-  cat >>"$target" <<'EOF'
-load_claude_code_oauth_token_env() {
-  local env_file="${CLAWBLOX_ENV_FILE:-.env}"
-  local line value
-  if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" || ! -f "$env_file" ]]; then
-    return 0
-  fi
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?CLAUDE_CODE_OAUTH_TOKEN[[:space:]]*=[[:space:]]*(.*)$ ]]; then
-      value="${BASH_REMATCH[2]}"
-      value="${value%%#*}"
-      value="${value#"${value%%[![:space:]]*}"}"
-      value="${value%"${value##*[![:space:]]}"}"
-      if [[ "$value" == \"*\" && "$value" == *\" ]]; then
-        value="${value:1:${#value}-2}"
-      elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
-        value="${value:1:${#value}-2}"
-      fi
-      export CLAUDE_CODE_OAUTH_TOKEN="$value"
-      return 0
-    fi
-  done <"$env_file"
-}
-load_claude_code_oauth_token_env
-EOF
-  cat >>"$target" <<EOF
-${auth_env_prefix}WORLD_BASE_URL=$(printf '%q' "$world_url") WORLD_INTERNAL_BASE_URL=$(printf '%q' "$world_internal_url") WORLD_AGENT_NAME=$(printf '%q' "$agent_display_name") WORLD_SOURCE_DIR=$(printf '%q' "$world_source_dir") AGENT_DIR=$(printf '%q' "$agent_dir") WORKSPACE_DIR=$(printf '%q' "$agent_workspace") SESSION_ID_FILE=$(printf '%q' "$session_id_file") WORLD_SESSION_FILE=$(printf '%q' "$world_session_file") RESET_EVERY=$(printf '%q' "$reset_every_seconds") DURATION_SECONDS=$(printf '%q' "$duration_seconds") CHECKPOINT_WARNING_SECONDS=$(printf '%q' "$checkpoint_warning_seconds") CHECKPOINT_WARNING_PROMPT=$(printf '%q' "$checkpoint_warning_prompt") CLAUDE_MODEL=$(printf '%q' "$claude_model") CLAUDE_PERMISSION_MODE=$(printf '%q' "$claude_permission_mode") CLAUDE_BARE=$(printf '%q' "$claude_bare") CLAUDE_EXTRA_ARGS=$(printf '%q' "$claude_extra_args") CLAWBLOX_CLAUDE_BIN=$(printf '%q' "$claude_bin") CLAWBLOX_CLAUDE_CODE_VERSION_PIN=$(printf '%q' "$claude_code_version_pin") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}bash $(printf '%q' "$AGENT_SCRIPT")
-EOF
-  chmod +x "$target"
-}
-
 world_capability_proxy_enabled() {
   case "$WORLD_CAPABILITY_PROXY" in
     1|true|yes|on) return 0 ;;
@@ -294,50 +199,6 @@ start_world_capability_proxy() {
   exit 1
 }
 
-start_agent_recovery_watchdog() {
-  local pane_id="$1"
-  local agent_dir="$2"
-  local command_file="$3"
-  local agent_log_file="$4"
-  local runtime_dir pid_file existing_pid watcher_pid
-
-  [[ -x "$WATCHDOG_SCRIPT" ]] || return 0
-
-  runtime_dir="$agent_dir/runtime"
-  pid_file="$runtime_dir/recovery_watchdog.pid"
-  while IFS= read -r existing_pid; do
-    [[ -n "$existing_pid" ]] || continue
-    if kill -0 "$existing_pid" 2>/dev/null; then
-      kill "$existing_pid" 2>/dev/null || true
-      append_launcher_audit "watchdog_cleanup_killed" "agent_dir=$agent_dir watchdog_pid=$existing_pid"
-    fi
-  done < <(
-    ps -eo pid=,args= | awk -v script="$WATCHDOG_SCRIPT" -v agent_dir="$agent_dir" '
-      index($0, script) && index($0, agent_dir) { print $1 }
-    '
-  )
-  if [[ -f "$pid_file" ]]; then
-    existing_pid="$(tr -d '[:space:]' <"$pid_file" 2>/dev/null || true)"
-    if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
-      kill "$existing_pid" 2>/dev/null || true
-    fi
-    rm -f "$pid_file"
-  fi
-
-  CLAUDE_FAILURE_IDLE_GRACE_SECONDS="$CLAUDE_FAILURE_IDLE_GRACE_SECONDS" \
-    CLAUDE_FAILURE_STALL_GRACE_SECONDS="$CLAUDE_FAILURE_STALL_GRACE_SECONDS" \
-    CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS="$CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS" \
-    nohup bash "$WATCHDOG_SCRIPT" \
-      --pane-id "$pane_id" \
-      --agent-dir "$agent_dir" \
-      --command-file "$command_file" \
-      --agent-log-file "$agent_log_file" \
-      >/dev/null 2>&1 &
-  watcher_pid="$!"
-  printf '%s\n' "$watcher_pid" >"$pid_file"
-  append_launcher_audit "watchdog_started" "pane_id=$pane_id agent_dir=$agent_dir watchdog_pid=$watcher_pid"
-}
-
 archive_existing_run_dir() {
   local run_dir="$1"
   local ts archive_dir
@@ -358,7 +219,7 @@ agent_display_name_for_index() {
 }
 
 session_meta_file() {
-  printf '%s/.clawblox-multi/%s.env' "$ROOT_DIR" "$(sanitize_name "$TMUX_SESSION")"
+  printf '%s/.agent-multi/%s.env' "$ROOT_DIR" "$(sanitize_name "$TMUX_SESSION")"
 }
 
 write_run_metadata() {
@@ -378,7 +239,10 @@ RECORD=$(printf '%q' "$RECORD")
 RESET_EVERY=$(printf '%q' "$RESET_EVERY")
 WORLD_SERVER_CMD=$(printf '%q' "$WORLD_SERVER_CMD")
 TMUX_SESSION=$(printf '%q' "$TMUX_SESSION")
+AGENT_BACKEND=$(printf '%q' "$AGENT_BACKEND")
+AGENT_MODEL=$(printf '%q' "$AGENT_MODEL")
 EOF
+  agent_write_run_metadata "$target"
 }
 
 write_session_metadata() {
@@ -397,12 +261,21 @@ write_run_config() {
   local target="$1"
   mkdir -p "$(dirname "$target")"
   local agent_template_dirs_joined=""
+  local agent_hook_names_joined=""
   if ((${#AGENT_TEMPLATE_DIRS[@]} > 0)); then
     agent_template_dirs_joined="$(printf '%s\n' "${AGENT_TEMPLATE_DIRS[@]}")"
+  fi
+  if ((${#AGENT_HOOK_SPECS[@]} > 0)); then
+    agent_hook_names_joined="$(
+      for hook_spec in "${AGENT_HOOK_SPECS[@]}"; do
+        printf '%s\n' "${hook_spec%%=*}"
+      done
+    )"
   fi
   RUN_CONFIG_TARGET="$target" \
   RUN_ID="$RUN_ID" \
   LAUNCH_INSTANCE_ID="$LAUNCH_INSTANCE_ID" \
+  AGENT_BACKEND="$AGENT_BACKEND" \
   NUM_WORLDS="$NUM_WORLDS" \
   AGENTS_PER_WORLD="$AGENTS_PER_WORLD" \
   BASE_PORT="$BASE_PORT" \
@@ -410,14 +283,7 @@ write_run_config() {
   RESULTS_ABS_ROOT="$RESULTS_ABS_ROOT" \
   TMUX_SESSION="$TMUX_SESSION" \
   GOAL="$GOAL" \
-  CLAUDE_MODEL="$CLAUDE_MODEL" \
-  CLAUDE_PERMISSION_MODE="$CLAUDE_PERMISSION_MODE" \
-  CLAUDE_BARE="$CLAUDE_BARE" \
-  CLAUDE_EXTRA_ARGS="$CLAUDE_EXTRA_ARGS" \
-  CLAUDE_USE_ENV_AUTH="$CLAUDE_USE_ENV_AUTH" \
-  CLAUDE_CODE_OAUTH_TOKEN_PRESENT="$([[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && printf 1 || printf 0)" \
-  CLAWBLOX_CLAUDE_BIN="$CLAWBLOX_CLAUDE_BIN" \
-  CLAWBLOX_CLAUDE_CODE_VERSION_PIN="$CLAWBLOX_CLAUDE_CODE_VERSION_PIN" \
+  AGENT_MODEL="$AGENT_MODEL" \
   SANDBOX="$SANDBOX" \
   SKIP_SOUL="$SKIP_SOUL" \
   WORLD_CAPABILITY_PROXY="$WORLD_CAPABILITY_PROXY" \
@@ -425,6 +291,7 @@ write_run_config() {
   SYSTEM_PROMPT_TEMPLATE="${SYSTEM_PROMPT_TEMPLATE:-}" \
   AGENT_NAME_PREFIX="$AGENT_NAME_PREFIX" \
   AGENT_TEMPLATE_DIRS_JOINED="$agent_template_dirs_joined" \
+  AGENT_HOOK_NAMES_JOINED="$agent_hook_names_joined" \
   DURATION="$DURATION" \
   RESET_EVERY="$RESET_EVERY" \
   CHECKPOINT_INTERVAL="$CHECKPOINT_INTERVAL" \
@@ -451,17 +318,9 @@ config = {
     "results_root": os.environ["RESULTS_ABS_ROOT"],
     "tmux_session": os.environ["TMUX_SESSION"],
     "goal": os.environ.get("GOAL", ""),
-    "claude": {
-        "model": os.environ["CLAUDE_MODEL"],
-        "permission_mode": os.environ["CLAUDE_PERMISSION_MODE"],
-        "bare": _bool(os.environ["CLAUDE_BARE"]),
-        "extra_args": os.environ.get("CLAUDE_EXTRA_ARGS", ""),
-        "use_env_auth": _bool(os.environ["CLAUDE_USE_ENV_AUTH"]),
-        "uses_claude_code_oauth_token": _bool(os.environ["CLAUDE_CODE_OAUTH_TOKEN_PRESENT"]),
-        "binary_override": os.environ.get("CLAWBLOX_CLAUDE_BIN", ""),
-        "version_pin": os.environ.get("CLAWBLOX_CLAUDE_CODE_VERSION_PIN", ""),
-    },
     "agent": {
+        "backend": os.environ["AGENT_BACKEND"],
+        "model": os.environ.get("AGENT_MODEL", ""),
         "sandbox": _bool(os.environ["SANDBOX"]),
         "skip_soul": _bool(os.environ["SKIP_SOUL"]),
         "world_capability_proxy": os.environ["WORLD_CAPABILITY_PROXY"],
@@ -469,6 +328,9 @@ config = {
         "agent_name_prefix": os.environ["AGENT_NAME_PREFIX"],
         "agent_template_dirs": [
             line for line in os.environ.get("AGENT_TEMPLATE_DIRS_JOINED", "").splitlines() if line
+        ],
+        "hook_names": [
+            line for line in os.environ.get("AGENT_HOOK_NAMES_JOINED", "").splitlines() if line
         ],
     },
     "session_cycling": {
@@ -490,6 +352,33 @@ with open(os.environ["RUN_CONFIG_TARGET"], "w", encoding="utf-8") as f:
     json.dump(config, f, indent=2, sort_keys=True)
     f.write("\n")
 PY
+}
+
+write_agent_context() {
+  local target="$1"
+  mkdir -p "$(dirname "$target")"
+  cat >"$target" <<EOF
+AGENT_BACKEND=$(printf '%q' "$AGENT_BACKEND")
+AGENT_DISPLAY_NAME=$(printf '%q' "$agent_display_name")
+AGENT_DIR=$(printf '%q' "$agent_dir")
+AGENT_LOG_DIR=$(printf '%q' "$agent_log_dir")
+AGENT_RUNTIME_DIR=$(printf '%q' "$agent_runtime_dir")
+AGENT_WORKSPACE_DIR=$(printf '%q' "$agent_workspace")
+AGENT_WORLD_BASE_URL=$(printf '%q' "$agent_world_url")
+AGENT_WORLD_INTERNAL_BASE_URL=$(printf '%q' "$agent_internal_world_url")
+AGENT_WORLD_SOURCE_DIR=$(printf '%q' "$WORLD_ABS_DIR")
+AGENT_WORLD_SESSION_FILE=$(printf '%q' "$agent_world_session_file")
+AGENT_RESET_EVERY_SECONDS=$(printf '%q' "$RESET_EVERY_SECONDS")
+AGENT_DURATION_SECONDS=$(printf '%q' "$DURATION_SECONDS")
+AGENT_CHECKPOINT_WARNING_SECONDS=$(printf '%q' "$CHECKPOINT_WARNING_SECONDS")
+AGENT_CHECKPOINT_WARNING_PROMPT=$(printf '%q' "$CHECKPOINT_WARNING_PROMPT")
+AGENT_SANDBOX=$(printf '%q' "$SANDBOX")
+AGENT_WORLD_HTTP_PROXY_PORT=$(printf '%q' "${proxy_port:-}")
+AGENT_TEMPLATE_DIR=$(printf '%q' "$agent_template_abs_dir")
+AGENT_SYSTEM_PROMPT_TEMPLATE=$(printf '%q' "${SYSTEM_PROMPT_TEMPLATE:-}")
+AGENT_SKIP_SOUL=$(printf '%q' "$SKIP_SOUL")
+AGENT_STARTUP_INSTRUCTIONS=$(printf '%q' "$startup_instructions")
+EOF
 }
 
 load_session_metadata() {
@@ -694,11 +583,13 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [--stop|--status] [options]
 
-Launch a simulator world with Claude Code agents in tmux.
+Launch a simulator world with pluggable agents in tmux.
 
 Options include:
+  --backend BACKEND             Agent backend to use (default: claude)
+  --agent-hook HOOK=COMMAND     Register an agent lifecycle hook command
   --world-server-cmd CMD        Command used to start the simulator; --port is appended
-  --skip-soul, --no-soul        Do not seed or append SOUL.md for Claude agents
+  Backend-specific options are forwarded to the selected agent backend.
 EOF
 }
 
@@ -921,52 +812,6 @@ ensure_ports_available() {
   exit 1
 }
 
-require_claude_auth() {
-  local claude_bin=""
-
-  if [[ -n "$CLAWBLOX_CLAUDE_BIN" ]]; then
-    if [[ -x "$CLAWBLOX_CLAUDE_BIN" ]]; then
-      claude_bin="$CLAWBLOX_CLAUDE_BIN"
-    else
-      echo "Error: CLAWBLOX_CLAUDE_BIN is not executable: $CLAWBLOX_CLAUDE_BIN"
-      exit 1
-    fi
-  elif [[ -n "$CLAWBLOX_CLAUDE_CODE_VERSION_PIN" ]]; then
-    local version_bin="$HOME/.local/share/claude/versions/$CLAWBLOX_CLAUDE_CODE_VERSION_PIN"
-    if [[ -x "$version_bin" ]]; then
-      claude_bin="$version_bin"
-    fi
-  fi
-
-  if [[ -z "$claude_bin" ]]; then
-    if ! claude_bin="$(command -v claude 2>/dev/null)"; then
-      echo "Error: claude CLI was not found in PATH."
-      exit 1
-    fi
-  fi
-
-  if ! "$claude_bin" auth status --text >/dev/null 2>&1; then
-    echo "Error: Claude Code is not logged in for $claude_bin. Run: $claude_bin auth login"
-    exit 1
-  fi
-}
-
-require_sandbox_runtime() {
-  local native_sandbox="${CLAUDE_NATIVE_SANDBOX:-$SANDBOX}"
-  if [[ "$SANDBOX" != "1" ]]; then
-    return 0
-  fi
-  if ! command -v bwrap >/dev/null 2>&1; then
-    echo "Error: --sandbox requires bubblewrap (bwrap)." >&2
-    exit 1
-  fi
-  if [[ "$native_sandbox" == "1" ]] && ! command -v socat >/dev/null 2>&1; then
-    echo "Error: --sandbox requires socat for Claude Code's native Linux sandbox." >&2
-    echo "Install socat, or set CLAUDE_NATIVE_SANDBOX=0 only for non-secure local debugging." >&2
-    exit 1
-  fi
-}
-
 FORCE=0
 ACTION="run"
 CLI_NUM_WORLDS=0
@@ -980,6 +825,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --stop) ACTION="stop"; shift ;;
     --status) ACTION="status"; shift ;;
+    --backend) require_value "$1" "${2:-}"; AGENT_BACKEND="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --num-worlds) require_value "$1" "${2:-}"; NUM_WORLDS="$2"; CLI_NUM_WORLDS=1; shift 2 ;;
     --agents-per-world) require_value "$1" "${2:-}"; AGENTS_PER_WORLD="$2"; CLI_AGENTS_PER_WORLD=1; shift 2 ;;
@@ -996,24 +842,43 @@ while [[ $# -gt 0 ]]; do
     --goal) require_value "$1" "${2:-}"; GOAL="$2"; shift 2 ;;
     --reset-every) require_value "$1" "${2:-}"; RESET_EVERY="$2"; CLI_RESET_EVERY=1; shift 2 ;;
     --duration) require_value "$1" "${2:-}"; DURATION="$2"; shift 2 ;;
-    --model) require_value "$1" "${2:-}"; CLAUDE_MODEL="$2"; shift 2 ;;
-    --permission-mode) require_value "$1" "${2:-}"; CLAUDE_PERMISSION_MODE="$2"; shift 2 ;;
-    --claude-extra-args) require_value "$1" "${2:-}"; CLAUDE_EXTRA_ARGS="$2"; shift 2 ;;
-    --use-env-auth) CLAUDE_USE_ENV_AUTH=1; shift ;;
+    --model) require_value "$1" "${2:-}"; AGENT_MODEL="$2"; shift 2 ;;
     --sandbox) SANDBOX=1; shift ;;
-    --skip-soul|--no-soul) SKIP_SOUL=1; shift ;;
     --world-capability-proxy) WORLD_CAPABILITY_PROXY=true; shift ;;
     --no-world-capability-proxy) WORLD_CAPABILITY_PROXY=false; shift ;;
     --template|--template-dir) require_value "$1" "${2:-}"; TEMPLATE_DIR="$2"; shift 2 ;;
     --system-prompt) require_value "$1" "${2:-}"; SYSTEM_PROMPT_TEMPLATE="$2"; shift 2 ;;
     --agent-template) require_value "$1" "${2:-}"; AGENT_TEMPLATE_DIRS+=("$2"); shift 2 ;;
+    --agent-hook) require_value "$1" "${2:-}"; AGENT_HOOK_SPECS+=("$2"); shift 2 ;;
     --results-root) require_value "$1" "${2:-}"; RESULTS_ROOT="$2"; shift 2 ;;
     --resume) require_value "$1" "${2:-}"; RESUME_PATH="$2"; shift 2 ;;
     --checkpoint-interval) require_value "$1" "${2:-}"; CHECKPOINT_INTERVAL="$2"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
-    *) echo "Unknown option: $1"; usage; exit 1 ;;
+    *)
+      set +e
+      AGENT_PARSE_CONSUMED=0
+      agent_parse_arg "$@"
+      parse_status=$?
+      set -e
+      if [[ "$parse_status" -eq 0 && "$AGENT_PARSE_CONSUMED" =~ ^[1-9][0-9]*$ ]]; then
+        shift "$AGENT_PARSE_CONSUMED"
+      elif [[ "$parse_status" -eq 2 ]]; then
+        echo "Error: $1 requires a value."
+        usage
+        exit 1
+      else
+        echo "Unknown option: $1"
+        usage
+        exit 1
+      fi
+      ;;
   esac
 done
+
+if [[ -z "$TMUX_SESSION" ]]; then
+  TMUX_SESSION="agents-${AGENT_BACKEND}"
+fi
+agent_set_defaults
 
 case "$ACTION" in
   stop) do_stop; exit 0 ;;
@@ -1026,8 +891,20 @@ if [[ "$SKIP_SOUL" != "0" && "$SKIP_SOUL" != "1" ]]; then
 fi
 
 refresh_afs_tokens
-require_claude_auth
-require_sandbox_runtime
+agent_validate
+for hook_spec in "${AGENT_HOOK_SPECS[@]}"; do
+  if [[ "$hook_spec" != *=* ]]; then
+    echo "Error: --agent-hook must be HOOK=COMMAND (got '$hook_spec')." >&2
+    exit 1
+  fi
+  hook_name="${hook_spec%%=*}"
+  hook_command="${hook_spec#*=}"
+  if [[ -z "$hook_name" || -z "$hook_command" ]]; then
+    echo "Error: --agent-hook must include a non-empty hook name and command." >&2
+    exit 1
+  fi
+  agent_hook_validate "$hook_name"
+done
 
 if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
   if [[ "$FORCE" -eq 1 ]]; then
@@ -1283,7 +1160,7 @@ if [[ -n "$RESET_EVERY" ]]; then
   RESET_EVERY_SECONDS="$(parse_duration_seconds "$RESET_EVERY")"
 fi
 
-echo "Launching $AGENTS_PER_WORLD Claude agents per world..."
+echo "Launching $AGENTS_PER_WORLD ${AGENT_BACKEND} agents per world..."
 for ((i = 0; i < NUM_WORLDS; i++)); do
   port=$((BASE_PORT + i))
   url="http://localhost:${port}"
@@ -1307,7 +1184,6 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
     agent_log_dir="$agent_dir/logs"
     agent_runtime_dir="$agent_dir/runtime"
     agent_workspace="$agent_dir/workspace"
-    agent_session_file="$agent_dir/claude_session_id.txt"
     agent_log_file="$agent_log_dir/agent.log"
     agent_world_session_file="$agent_dir/world_session.txt"
     mkdir -p "$agent_log_dir" "$agent_workspace" "$agent_runtime_dir"
@@ -1317,37 +1193,9 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
       agent_template_abs_dir="${AGENT_TEMPLATE_ABS_DIRS[$j]}"
     fi
 
-    template_env_prefix=""
-    if [[ -n "$agent_template_abs_dir" ]]; then
-      template_env_prefix="TEMPLATE_DIR=$(printf '%q' "$agent_template_abs_dir") "
-    fi
-    if [[ -n "$SYSTEM_PROMPT_TEMPLATE" ]]; then
-      template_env_prefix+="SYSTEM_PROMPT_TEMPLATE=$(printf '%q' "$SYSTEM_PROMPT_TEMPLATE") "
-    fi
-    if [[ "$SKIP_SOUL" == "1" ]]; then
-      template_env_prefix+="SKIP_SOUL=1 "
-    fi
-    startup_env_prefix=""
-    if [[ -n "$startup_instructions" ]]; then
-      startup_instructions_q="$(printf '%q' "$startup_instructions")"
-      startup_env_prefix="WORLD_STARTUP_INSTRUCTIONS=${startup_instructions_q} "
-    fi
-
-    auth_env_prefix="unset ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN; "
-    if [[ "$CLAUDE_USE_ENV_AUTH" == "1" ]]; then
-      if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
-        auth_env_prefix="unset ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN; "
-      elif [[ -n "${ANTHROPIC_OAUTH_TOKEN:-}" ]]; then
-        auth_env_prefix="unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; ANTHROPIC_OAUTH_TOKEN=$(printf '%q' "$ANTHROPIC_OAUTH_TOKEN") "
-      fi
-    fi
-
-    sandbox_env_prefix=""
-    if [[ "$SANDBOX" == "1" ]]; then
-      sandbox_env_prefix="SANDBOX=1 "
-    fi
     agent_world_url="$url"
     agent_internal_world_url="$url"
+    proxy_port=""
     if world_capability_proxy_enabled; then
       proxy_public_host="world"
       proxy_pid="$(
@@ -1360,37 +1208,28 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
       )"
       proxy_port="$(tr -d '[:space:]' < "$agent_runtime_dir/world_proxy_port.txt")"
       agent_world_url="http://${proxy_public_host}"
-      sandbox_env_prefix+="CLAWBLOX_WORLD_HTTP_PROXY_PORT=$(printf '%q' "$proxy_port") "
       printf '%s\n' "$proxy_public_host" >"$agent_runtime_dir/world_proxy_public_host.txt"
       append_launcher_audit "world_capability_proxy_started" "agent_dir=$agent_dir pid=$proxy_pid public_host=$proxy_public_host listen_port=$proxy_port target=$url"
     fi
 
+    for hook_spec in "${AGENT_HOOK_SPECS[@]}"; do
+      if [[ "$hook_spec" != *=* ]]; then
+        echo "Error: --agent-hook must be HOOK=COMMAND (got '$hook_spec')." >&2
+        exit 1
+      fi
+      hook_name="${hook_spec%%=*}"
+      hook_command="${hook_spec#*=}"
+      if [[ -z "$hook_name" || -z "$hook_command" ]]; then
+        echo "Error: --agent-hook must include a non-empty hook name and command." >&2
+        exit 1
+      fi
+      agent_hook_set "$agent_dir" "$hook_name" "$hook_command"
+    done
+
     pane_command_file="$agent_runtime_dir/launch_agent_pane.sh"
-    write_agent_pane_command \
-      "$pane_command_file" \
-      "$ROOT_DIR" \
-      "$auth_env_prefix" \
-      "$agent_world_url" \
-      "$agent_internal_world_url" \
-      "$agent_display_name" \
-      "$agent_dir" \
-      "$agent_workspace" \
-      "$agent_session_file" \
-      "$agent_world_session_file" \
-      "$RESET_EVERY_SECONDS" \
-      "$DURATION_SECONDS" \
-      "$CHECKPOINT_WARNING_SECONDS" \
-      "$CHECKPOINT_WARNING_PROMPT" \
-      "$CLAUDE_MODEL" \
-      "$CLAUDE_PERMISSION_MODE" \
-      "$CLAUDE_BARE" \
-      "$CLAUDE_EXTRA_ARGS" \
-      "$sandbox_env_prefix" \
-      "$template_env_prefix" \
-      "$startup_env_prefix" \
-      "$CLAWBLOX_CLAUDE_BIN" \
-      "$CLAWBLOX_CLAUDE_CODE_VERSION_PIN" \
-      "$WORLD_ABS_DIR"
+    agent_context_file="$agent_runtime_dir/agent_context.env"
+    write_agent_context "$agent_context_file"
+    agent_start_command "$agent_dir" "$agent_context_file" "$pane_command_file"
     printf '%s\n' "$pane_target" >"$agent_runtime_dir/pane_id.txt"
     printf '%s\n' "$pane_command_file" >"$agent_runtime_dir/pane_command_file.txt"
 
@@ -1398,7 +1237,7 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
     pane_command_file_q="$(printf '%q' "$pane_command_file")"
     tmux pipe-pane -o -t "$pane_target" "cat >> $agent_log_file_q"
     tmux send-keys -t "$pane_target" "bash $pane_command_file_q" Enter
-    start_agent_recovery_watchdog "$pane_target" "$agent_dir" "$pane_command_file" "$agent_log_file"
+    agent_after_start "$pane_target" "$agent_dir" "$pane_command_file" "$agent_log_file"
   done
 done
 if [[ -n "$DURATION" ]]; then
@@ -1416,7 +1255,7 @@ if [[ -n "$DURATION" ]]; then
       CLAWBLOX_EXPECT_LAUNCH_INSTANCE_ID="$expected_launch_instance_id" \
       CLAWBLOX_AUTO_TIMER_PID="$BASHPID" \
       CLAWBLOX_STOP_REASON="duration_elapsed" \
-      CLAWBLOX_STOP_SOURCE="launch_multi_claude_auto_timer" \
+      CLAWBLOX_STOP_SOURCE="launch_multi_auto_timer" \
       bash "$0" --stop --tmux-session "$TMUX_SESSION"
   ) &
   AUTO_STOP_PID="$!"

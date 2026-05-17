@@ -6,8 +6,9 @@ import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parent
-PANDA_XML = ROOT / "models" / "franka_emika_panda" / "panda.xml"
-DUAL_SCENE = ROOT / "models" / "panda_dual" / "generated_scene.xml"
+PANDA_WORLD = ROOT / "worlds" / "mujoco-panda"
+PANDA_XML = PANDA_WORLD / "models" / "franka_emika_panda" / "panda.xml"
+DUAL_SCENE = ROOT / "worlds" / "mujoco-dual-panda" / "models" / "generated_scene.xml"
 
 ARM_POSITIONS = {
     "left": "0 0.45 0",
@@ -40,7 +41,7 @@ def build_dual_panda_scene_xml() -> str:
         "compiler",
         {
             "angle": "radian",
-            "meshdir": "../franka_emika_panda",
+            "meshdir": "../../mujoco-panda/models/franka_emika_panda",
             "autolimits": "true",
         },
     )

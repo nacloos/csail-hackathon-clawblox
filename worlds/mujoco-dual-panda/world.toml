@@ -1,0 +1,15 @@
+name = "MuJoCo Dual Panda"
+description = "Two Franka Panda arms sharing one MuJoCo construction world."
+
+[runtime]
+mode = "external"
+
+[run]
+command = [
+  "uv", "run", "--project", "../..",
+  "python", "../../server.py",
+  "--dual-panda",
+]
+
+[agent]
+source_workspace = true

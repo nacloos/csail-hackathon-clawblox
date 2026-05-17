@@ -1,5 +1,5 @@
 <mujoco model="panda cube scene">
-  <compiler angle="radian" meshdir="../franka_emika_panda/assets" autolimits="true"/>
+  <compiler angle="radian" autolimits="true"/>
 
   <option cone="elliptic" impratio="20" iterations="100" tolerance="1e-10"/>
 
@@ -82,4 +82,8 @@
 
     <camera name="overview" pos="1.15 -1.05 0.70" xyaxes="0.674 0.739 0 -0.31 0.28 0.91"/>
   </worldbody>
+
+  <keyframe>
+    <key name="home" qpos="0 0 0 -1.57079 0 1.57079 -0.7853 0.04 0.04 0.55 0 0.04 1 0 0 0 0.38 0.34 0.04 1 0 0 0 0.38 -0.34 0.04 1 0 0 0 0.05 0.44 0.04 1 0 0 0 0.05 -0.44 0.03 0.923879539193 0 0 0.382683416234 -0.18 0.28 0.03 0.923879539193 0 0 -0.382683416234 -0.18 -0.28 0.025 1 0 0 0 -0.3 0 0.055 1 0 0 0 0.78 0.22 0.055 1 0 0 0" ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 255"/>
+  </keyframe>
 </mujoco>

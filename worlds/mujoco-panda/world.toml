@@ -1,0 +1,15 @@
+name = "MuJoCo Panda"
+description = "Franka Panda MuJoCo construction world."
+
+[runtime]
+mode = "external"
+
+[run]
+command = [
+  "uv", "run", "--project", "../..",
+  "python", "../../server.py",
+  "--scene", "models/panda_cube/scene.xml",
+]
+
+[agent]
+source_workspace = true

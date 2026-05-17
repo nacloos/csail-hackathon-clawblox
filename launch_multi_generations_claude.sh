@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ROOT_DIR="$SCRIPT_DIR"
 LAUNCH_SCRIPT="${LAUNCH_SCRIPT:-$ROOT_DIR/agent/launch_multi_claude.sh}"
 
 GENERATIONS="${GENERATIONS:-5}"
@@ -12,7 +12,7 @@ RUN_PREFIX="${RUN_PREFIX:-$EXPERIMENT_ID}"
 TMUX_PREFIX="${TMUX_PREFIX:-clawblox-gen-claude}"
 RUN_PREFIX_EXPLICIT=0
 TMUX_PREFIX_EXPLICIT=0
-WORLD_DIR="${WORLD_DIR:-worlds/mesa-world}"
+WORLD_DIR="${WORLD_DIR:-}"
 BASE_PORT="${BASE_PORT:-8085}"
 AGENTS_PER_WORLD="${AGENTS_PER_WORLD:-1}"
 RECORD="${RECORD:-true}"
@@ -29,7 +29,7 @@ AGENT_NAME_PREFIX="${AGENT_NAME_PREFIX:-agent}"
 GOAL="${GOAL:-}"
 INITIAL_TEMPLATE="${INITIAL_TEMPLATE:-}"
 SYSTEM_PROMPT_TEMPLATE="${SYSTEM_PROMPT_TEMPLATE:-}"
-WORLD_SERVER_CMD="${WORLD_SERVER_CMD:-uv run --with mujoco --with fastapi --with uvicorn python server.py}"
+WORLD_SERVER_CMD="${WORLD_SERVER_CMD:-}"
 CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-6}"
 CLAUDE_PERMISSION_MODE="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 CLAUDE_BARE="${CLAUDE_BARE:-0}"
@@ -696,6 +696,10 @@ if ((KEEP_WORLD == 1)) && ((SAVE_GRACE_SECONDS <= 0 || GENERATION_DURATION_SECON
   exit 1
 fi
 
+if [[ -z "$WORLD_DIR" ]]; then
+  echo "Error: --world-dir is required"
+  exit 1
+fi
 WORLD_ABS_DIR="$(to_world_abs_dir "$WORLD_DIR")"
 if [[ ! -d "$WORLD_ABS_DIR" ]]; then
   echo "Error: world directory not found at $WORLD_ABS_DIR"
