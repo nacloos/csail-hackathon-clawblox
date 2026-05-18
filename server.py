@@ -5,6 +5,7 @@ from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import os
 from pathlib import Path
 import threading
 import time
@@ -24,6 +25,30 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8080
 DEFAULT_SPECTATOR_PORT_OFFSET = 1000
 DEFAULT_RECORD_DIR = ROOT / "recordings"
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid {name}={value!r}: expected integer") from exc
+
+
+def env_path(name: str, default: Path | None = None) -> Path | None:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    return Path(value)
 
 GEOM_TYPES = {
     int(mujoco.mjtGeom.mjGEOM_PLANE): "plane",
@@ -800,8 +825,8 @@ app = create_app(sim)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the MuJoCo API server.")
-    parser.add_argument("--host", default=DEFAULT_HOST)
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--host", default=os.environ.get("WORLD_HOST", DEFAULT_HOST))
+    parser.add_argument("--port", type=int, default=env_int("WORLD_PORT", DEFAULT_PORT))
     parser.add_argument("--scene", type=Path, default=SCENE)
     parser.add_argument("--api-doc", type=Path)
     parser.add_argument("--no-spectator", action="store_true", help="Disable the live browser spectator.")
@@ -810,8 +835,13 @@ def main() -> None:
     parser.add_argument("--spectator-port", type=int)
     parser.add_argument("--spectator-hz", type=float, default=30.0)
     parser.add_argument("--dual-panda", action="store_true", help="Run one shared world with left/right Panda arms.")
-    parser.add_argument("--record", action="store_true", help="Record the session to HDF5.")
-    parser.add_argument("--record-dir", type=Path, default=DEFAULT_RECORD_DIR)
+    parser.add_argument(
+        "--record",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("WORLD_RECORD", False),
+        help="Record the session to HDF5.",
+    )
+    parser.add_argument("--record-dir", type=Path, default=env_path("WORLD_RECORD_DIR", DEFAULT_RECORD_DIR))
     parser.add_argument("--record-path", type=Path)
     parser.add_argument("--preview-hz", type=float, default=30.0)
     parser.add_argument("--checkpoint-seconds", type=float, default=1.0)

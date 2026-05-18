@@ -218,3 +218,17 @@ command = [
 
 Keep world-specific assets and instructions inside the world directory. Keep
 shared runtime behavior in the generic engine files at the repo root.
+
+External worlds launched through Clawblox receive runtime defaults through:
+
+```text
+WORLD_HOST
+WORLD_PORT
+WORLD_BASE_PATH
+WORLD_RECORD
+WORLD_RECORD_DIR
+WORLD_RESUME_PATH
+CLAWBLOX_BIN
+```
+
+Server CLI flags still override these environment defaults.
