@@ -80,6 +80,51 @@ when `X-Session` is provided. Observation is complete, but `SetControl` remains
 session-scoped. `objects` and `blocks` are compatibility views for construction
 objects.
 
+## Recommended Manipulation Workflow
+
+Sandboxed Panda agents are usually seeded with a local MuJoCo copy under
+`/workspace/local_mujoco/`. Use it as a robot-kinematics calculator, not as the
+source of live object truth:
+
+```python
+import mujoco
+
+model = mujoco.MjModel.from_xml_path(
+    "/workspace/local_mujoco/models/panda_cube/scene.xml"
+)
+data = mujoco.MjData(model)
+```
+
+Use `panda_cube/scene.xml` for IK/FK. Do not use `mjx_panda.xml` for
+manipulation planning; it omits the full live scene geometry and frame context.
+
+Before every plan, call `/observe` and hydrate local `MjData` from the live
+state:
+
+```python
+obs = observe()
+data.qpos[:] = obs["state"]["qpos"]
+data.qvel[:] = obs["state"]["qvel"]
+data.ctrl[:] = obs["state"]["ctrl"]
+mujoco.mj_forward(model, data)
+```
+
+Then use the live block/object positions from `obs["blocks"]` or
+`obs["objects"]` as targets. The copied XML contains initial object positions
+only; moved objects are only authoritative in `/observe`.
+
+For reliable pick/place behavior:
+- Move through high-clearance waypoints before lateral motion.
+- Send smooth interpolated `SetControl` waypoints rather than one large joint
+  jump.
+- Keep the gripper vertical/downward for contact moves; position-only IK can
+  reach the target while rotating the fingers into a bad collision pose.
+- Re-observe after every descent, close, lift, release, and retreat. Abort or
+  replan if the object shifted, tipped, or the fingertip/object offset is large.
+- Never use `ctrl[7] = 0` as a normal grasp. Full close can drive the finger
+  joints below their range and jam the gripper. Use a soft close such as
+  `ctrl[7] = 100` to `150`, and reopen with `255`.
+
 ### Get Agent API
 
 `GET /api.md`
@@ -104,7 +149,7 @@ full MuJoCo control vector.
 | Control | Meaning |
 |---------|---------|
 | `ctrl[0:7]` | Panda arm joint position targets in radians |
-| `ctrl[7]` | Gripper target, `0` closed and `255` open |
+| `ctrl[7]` | Gripper target, `255` open; lower values close. Avoid `0` during normal manipulation because it can jam the gripper. |
 
 In the dual-Panda world, use `SetControl` with your `X-Session` header. The
 server applies the 8-value vector only to the robot assigned by `/join`.

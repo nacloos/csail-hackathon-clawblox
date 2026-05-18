@@ -12,7 +12,7 @@ adds blocks, bricks, planks, pillars, lighting, and camera around that robot.
 Standalone viewer only:
 
 ```bash
-DISPLAY=:0 uv run --with mujoco python run_viewer.py
+DISPLAY=:0 uv run python run_viewer.py
 ```
 
 If the viewer opens, you should see the Panda arm in its home pose with objects
@@ -24,26 +24,25 @@ controls directly.
 Run the real-time simulation server:
 
 ```bash
-uv run --with mujoco --with fastapi --with uvicorn python server.py
+uv run python server.py
 ```
 
 Run the server and record an optimized replay artifact:
 
 ```bash
-uv run --with mujoco --with h5py --with fastapi --with uvicorn \
-  python server.py --record
+uv run python server.py --record
 ```
 
 Run the same API server with an attached viewer:
 
 ```bash
-DISPLAY=:0 uv run --with mujoco --with fastapi --with uvicorn python run_with_viewer.py
+DISPLAY=:0 uv run python run_with_viewer.py
 ```
 
 Run one shared server with two Panda arms:
 
 ```bash
-uv run --with mujoco --with fastapi --with uvicorn python server.py --dual-panda
+uv run python server.py --dual-panda
 ```
 
 In the dual-arm world, each `/join` response assigns a session to one robot
@@ -53,8 +52,7 @@ applies it only to the robot owned by that session.
 The viewer runner accepts the same recording flags:
 
 ```bash
-DISPLAY=:0 uv run --with mujoco --with h5py --with fastapi --with uvicorn \
-  python run_with_viewer.py --record --preview-hz 30 --checkpoint-seconds 1
+DISPLAY=:0 uv run python run_with_viewer.py --record --preview-hz 30 --checkpoint-seconds 1
 ```
 
 Use `run_with_viewer.py` when you want to see the exact simulation controlled by
@@ -73,7 +71,7 @@ curl -X POST http://localhost:8080/input \
 For headless rendering/debugging on WSL:
 
 ```bash
-MUJOCO_GL=egl uv run --with mujoco python smoke_test.py
+MUJOCO_GL=egl uv run python smoke_test.py
 ```
 
 ## Recordings and Replay
@@ -86,7 +84,7 @@ periodic full MuJoCo integration-state checkpoints for exact recovery work.
 Replay a recording with the native MuJoCo viewer:
 
 ```bash
-DISPLAY=:0 uv run --with mujoco --with h5py python run_replay.py recordings/<file>.h5
+DISPLAY=:0 uv run python run_replay.py recordings/<file>.h5
 ```
 
 Replay controls: space toggles play/pause, arrow keys seek by one simulated
@@ -95,7 +93,7 @@ second, Home/End jump to the start/end, and `[` / `]` adjust speed.
 Validate a recording without opening a viewer:
 
 ```bash
-uv run --with mujoco --with h5py python run_replay.py recordings/<file>.h5 --check
+uv run python run_replay.py recordings/<file>.h5 --check
 ```
 
 ## Claude Agent
@@ -103,7 +101,13 @@ uv run --with mujoco --with h5py python run_replay.py recordings/<file>.h5 --che
 Run one simulator world with one Claude agent and an attached viewer:
 
 ```bash
-bash agent/launch_multi_claude.sh --world-dir worlds/mujoco-panda --base-port 8085 --tmux-session mujoco-panda-agent --run-id mujoco-panda-test --model claude-opus-4-7 --sandbox --world-server-cmd 'DISPLAY=:0 uv run --with mujoco --with fastapi --with uvicorn python run_with_viewer.py'
+bash agent/launch_multi_claude.sh --world-dir worlds/mujoco-panda --base-port 8085 --tmux-session mujoco-panda-agent --run-id mujoco-panda-test --model claude-opus-4-7 --sandbox --world-server-cmd 'DISPLAY=:0 uv run python run_with_viewer.py'
+```
+
+Run repeated Claude generations on the Panda world:
+
+```bash
+bash worlds/mujoco-panda/launch_multi_generations_claude.sh --generations 15 --generation-duration 30m --base-port 8095 --tmux-prefix mujoco-panda-agent --run-prefix mujoco-panda-test --model claude-opus-4-7 --claude-extra-args '--effort low' --sandbox --world-server-cmd 'DISPLAY=:0 uv run python run_with_viewer.py'
 ```
 
 Run one simulator world with two Panda arms and two Claude agents:
@@ -117,7 +121,7 @@ bash agent/launch_multi_claude.sh \
   --agents-per-world 2 \
   --model claude-opus-4-7 \
   --sandbox \
-  --world-server-cmd 'DISPLAY=:0 uv run --with mujoco --with fastapi --with uvicorn python run_with_viewer.py --dual-panda'
+  --world-server-cmd 'DISPLAY=:0 uv run python run_with_viewer.py --dual-panda'
 ```
 
 Attach to the tmux session:
