@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import shutil
@@ -22,6 +23,7 @@ DEFAULT_MODELS = {
     "claude": "claude-opus-4-7",
     "codex": "gpt-5.5",
 }
+DEFAULT_CLAUDE_CODE_VERSION_PIN = "2.1.116"
 HEALTH_TIMEOUT_SECONDS = 30
 PORT_WAIT_SECONDS = 120
 STOP_GRACE_SECONDS = 1
@@ -61,6 +63,34 @@ def claude_auth_env() -> dict[str, str]:
         if line.startswith(f"{key}="):
             return {key: line.split("=", 1)[1].strip().strip("'\"")}
     return {}
+
+
+def resolve_claude_binary() -> Path | None:
+    explicit = os.environ.get("CLAWBLOX_CLAUDE_BIN", "").strip()
+    if explicit:
+        path = Path(explicit).expanduser()
+        if not path.is_file():
+            raise SystemExit(f"CLAWBLOX_CLAUDE_BIN does not exist: {path}")
+        if not os.access(path, os.X_OK):
+            raise SystemExit(f"CLAWBLOX_CLAUDE_BIN is not executable: {path}")
+        return path
+
+    version_pin = os.environ.get(
+        "CLAWBLOX_CLAUDE_CODE_VERSION_PIN",
+        DEFAULT_CLAUDE_CODE_VERSION_PIN,
+    ).strip()
+    if not version_pin:
+        return None
+
+    path = Path.home() / ".local" / "share" / "claude" / "versions" / version_pin
+    if path.is_file() and os.access(path, os.X_OK):
+        return path
+
+    raise SystemExit(
+        f"pinned Claude Code {version_pin} not found at {path}. "
+        "Set CLAWBLOX_CLAUDE_BIN=/path/to/claude, or set "
+        "CLAWBLOX_CLAUDE_CODE_VERSION_PIN= to use claude from PATH."
+    )
 
 
 def copy_template(src: Path, dst: Path) -> None:
@@ -103,6 +133,78 @@ def tail_text(path: Path, max_lines: int) -> str:
     return "\n".join(lines[-max_lines:]) or "(log file is empty)"
 
 
+def read_events(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    events = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return events
+
+
+def agent_failure_diagnostics(agent_dir: Path) -> str:
+    events_file = agent_dir / "events.jsonl"
+    runtime_dir = agent_dir / "runtime"
+    diagnostics = []
+
+    events = read_events(events_file)
+    process_events = [
+        event for event in events if event.get("operation") == "agent.process"
+    ]
+    failed_events = [
+        event for event in events if event.get("status") == "failed" or event.get("error")
+    ]
+    if process_events:
+        event = process_events[-1]
+        diagnostics.append(
+            "Last process event: "
+            f"{event.get('status', 'unknown')} "
+            f"exit_code={event.get('exit_code', 'unknown')} "
+            f"error={event.get('error') or 'none'}"
+        )
+    if failed_events:
+        event = failed_events[-1]
+        diagnostics.append(
+            "Last failure event: "
+            f"{event.get('operation', 'unknown')} "
+            f"error={event.get('error') or 'none'}"
+        )
+
+    settings_file = runtime_dir / "claude_sandbox_settings.json"
+    if settings_file.is_file():
+        try:
+            settings = json.loads(settings_file.read_text(encoding="utf-8"))
+            sandbox = settings.get("sandbox", {})
+            diagnostics.append(
+                "Claude native sandbox: "
+                f"enabled={sandbox.get('enabled')} "
+                f"failIfUnavailable={sandbox.get('failIfUnavailable')}"
+            )
+        except json.JSONDecodeError:
+            diagnostics.append(f"Claude sandbox settings could not be parsed: {settings_file}")
+
+    start_file = runtime_dir / "start.sh"
+    if start_file.is_file():
+        start_text = start_file.read_text(encoding="utf-8", errors="replace")
+        has_deps_mount = "/sandbox-deps" in start_text
+        diagnostics.append(f"Agent command file: {start_file}")
+        diagnostics.append(f"Sandbox deps mounted: {has_deps_mount}")
+        if "failIfUnavailable" in tail_text(settings_file, 20) and not has_deps_mount:
+            diagnostics.append(
+                "Hint: Claude native sandbox is strict, but sandbox deps are not mounted. "
+                "Set SANDBOX_DEPS_ROOT or use a Clawblox build with automatic sandbox deps detection."
+            )
+    else:
+        diagnostics.append(f"Agent command file missing: {start_file}")
+
+    if not diagnostics:
+        return "(no structured agent diagnostics found)"
+    return "\n".join(diagnostics)
+
+
 def tmux_window_exists(session: str, window: str) -> bool:
     result = subprocess.run(
         ["tmux", "list-windows", "-t", session, "-F", "#{window_name}"],
@@ -114,7 +216,7 @@ def tmux_window_exists(session: str, window: str) -> bool:
     return result.returncode == 0 and window in result.stdout.splitlines()
 
 
-def abort_with_log(title: str, log_file: Path) -> None:
+def abort_with_log(title: str, log_file: Path, *, agent_dir: Path | None = None) -> None:
     print("", file=sys.stderr, flush=True)
     print(title, file=sys.stderr, flush=True)
     print(f"Log: {log_file}", file=sys.stderr, flush=True)
@@ -122,6 +224,11 @@ def abort_with_log(title: str, log_file: Path) -> None:
     print(f"Last {WORLD_LOG_TAIL_LINES} log lines", file=sys.stderr, flush=True)
     print("-------------------------", file=sys.stderr, flush=True)
     print(tail_text(log_file, WORLD_LOG_TAIL_LINES), file=sys.stderr, flush=True)
+    if agent_dir is not None:
+        print("", file=sys.stderr, flush=True)
+        print("Structured diagnostics", file=sys.stderr, flush=True)
+        print("----------------------", file=sys.stderr, flush=True)
+        print(agent_failure_diagnostics(agent_dir), file=sys.stderr, flush=True)
     raise SystemExit(1)
 
 
@@ -135,6 +242,7 @@ def wait_for_world(
     world_window: str,
     agent_window: str,
     agent_log: Path,
+    agent_dir: Path,
 ) -> None:
     deadline = time.monotonic() + duration_seconds
     failures = 0
@@ -142,7 +250,11 @@ def wait_for_world(
         if not tmux_window_exists(tmux_session, world_window):
             abort_with_log(f"World tmux window exited: {tmux_session}:{world_window}", world_log)
         if not tmux_window_exists(tmux_session, agent_window):
-            abort_with_log(f"Agent tmux window exited: {tmux_session}:{agent_window}", agent_log)
+            abort_with_log(
+                f"Agent tmux window exited: {tmux_session}:{agent_window}",
+                agent_log,
+                agent_dir=agent_dir,
+            )
         if world_is_healthy(world_url):
             failures = 0
         else:
@@ -285,6 +397,7 @@ def main() -> None:
         name=args.agent_name,
         dir=agent_dir,
         model=model,
+        binary=resolve_claude_binary() if backend == "claude" else None,
         permission_mode=args.permission_mode,
         tmux=tmux_session,
         sandbox=args.sandbox,
@@ -330,7 +443,6 @@ def main() -> None:
         )
         remove_host_launch_artifacts(
             Path(started_world.command_file),
-            Path(started_agent.command_file),
         )
 
         print_run_summary(
@@ -358,6 +470,7 @@ def main() -> None:
             world_window="world-0",
             agent_window="agent-0-0",
             agent_log=Path(started_agent.agent_dir) / "logs" / "agent.log",
+            agent_dir=Path(started_agent.agent_dir),
         )
     finally:
         if started_agent is not None:
