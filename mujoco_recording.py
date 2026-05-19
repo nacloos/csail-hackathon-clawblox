@@ -11,6 +11,7 @@ import mujoco
 import numpy as np
 
 
+ROOT = Path(__file__).resolve().parent
 SCHEMA_VERSION = 1
 STATE_DTYPE = np.float64
 PREVIEW_DTYPE = np.float32
@@ -55,6 +56,44 @@ def timestamped_recording_path(record_dir: Path) -> Path:
     return record_dir / f"{stamp}.h5"
 
 
+def _toml_string(value: str) -> str:
+    return json.dumps(value)
+
+
+def replay_manifest_path(recording_path: Path) -> Path:
+    return recording_path.with_suffix(".replay.toml")
+
+
+def write_replay_manifest(recording_path: Path) -> Path:
+    manifest_path = replay_manifest_path(recording_path)
+    command = [
+        "uv",
+        "run",
+        "--project",
+        str(ROOT),
+        "python",
+        str(ROOT / "run_web_replay.py"),
+        "{recording}",
+        "--port",
+        "{port}",
+    ]
+    lines = [
+        "version = 1",
+        'format = "mujoco-h5"',
+        f"recording = {_toml_string(recording_path.name)}",
+        f"events = {_toml_string(recording_path.with_suffix('.events.jsonl').name)}",
+        "",
+        "command = [",
+    ]
+    lines.extend(f"  {_toml_string(item)}," for item in command)
+    lines.extend([
+        "]",
+        "",
+    ])
+    manifest_path.write_text("\n".join(lines), encoding="utf-8")
+    return manifest_path
+
+
 @dataclass(frozen=True)
 class RecordingConfig:
     preview_hz: float = 30.0
@@ -91,6 +130,7 @@ class RecordingWriter:
         h5py = _require_h5py()
         self.path = path
         self.events_path = path.with_suffix(".events.jsonl")
+        self.replay_manifest_path = replay_manifest_path(path)
         self.scene = scene
         self.config = config or RecordingConfig()
         self.state_sig = default_state_sig()
@@ -110,6 +150,7 @@ class RecordingWriter:
         self.events_file = self.events_path.open("a", encoding="utf-8")
         self._write_attrs(model)
         self._create_datasets(model)
+        write_replay_manifest(path)
 
     def record_initial(self, tick: int, model: mujoco.MjModel, data: mujoco.MjData) -> None:
         self.record_step(tick, model, data, force=True)
