@@ -117,8 +117,8 @@ session_transcript_path() {
   if [[ -f "$session_start_file" ]]; then
     src="$(
       INPUT_JSON="$(cat "$session_start_file")" node <<'EOF'
-const data = JSON.parse(process.env.INPUT_JSON ?? "{}");
-process.stdout.write(String(data.transcript_path ?? ""));
+var data = JSON.parse(process.env.INPUT_JSON || "{}");
+process.stdout.write(String(data.transcript_path || ""));
 EOF
     )"
   elif [[ -f "$HOOK_METADATA_FILE" ]]; then
@@ -136,12 +136,12 @@ EOF
 stop_failure_fields() {
   local path="$1"
   INPUT_JSON="$(cat "$path")" node <<'EOF'
-const data = JSON.parse(process.env.INPUT_JSON ?? "{}");
-const fields = [
-  data.error ?? "",
-  data.transcript_path ?? "",
+var data = JSON.parse(process.env.INPUT_JSON || "{}");
+var fields = [
+  data.error || "",
+  data.transcript_path || "",
 ];
-for (const value of fields) process.stdout.write(String(value) + "\n");
+for (var i = 0; i < fields.length; i += 1) process.stdout.write(String(fields[i]) + "\n");
 EOF
 }
 

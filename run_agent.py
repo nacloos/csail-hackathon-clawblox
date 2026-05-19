@@ -28,11 +28,6 @@ STOP_GRACE_SECONDS = 1
 WORLD_POLL_SECONDS = 2
 WORLD_FAILURES_BEFORE_ABORT = 3
 WORLD_LOG_TAIL_LINES = 80
-DEFAULT_SAVE_PROMPT = "You will be reset in 5 minutes. Update your workspace memory files now."
-GUEST_WORKSPACE_DIR = Path("/workspace")
-GUEST_RUNTIME_DIR = Path("/runtime")
-GUEST_PYTHON_INSTALL_DIR = GUEST_RUNTIME_DIR / "python"
-PYTHON_VERSION = "3.12"
 
 
 def parse_duration(value: str) -> int:
@@ -55,6 +50,19 @@ def utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def claude_auth_env() -> dict[str, str]:
+    key = "CLAUDE_CODE_OAUTH_TOKEN"
+    if token := os.environ.get(key):
+        return {key: token}
+    env_file = Path(os.environ.get("CLAWBLOX_ENV_FILE", ROOT / ".env"))
+    if not env_file.is_file():
+        return {}
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        if line.startswith(f"{key}="):
+            return {key: line.split("=", 1)[1].strip().strip("'\"")}
+    return {}
+
+
 def copy_template(src: Path, dst: Path) -> None:
     if not src.is_dir():
         raise SystemExit(f"agent template directory not found: {src}")
@@ -70,149 +78,6 @@ def copy_world_source(src: Path, dst: Path) -> None:
         }
 
     shutil.copytree(src, dst, ignore=ignore, dirs_exist_ok=True)
-
-
-def prepare_workspace_python_env(workspace_dir: Path, runtime_dir: Path, *, sandbox: bool) -> bool:
-    pyproject = workspace_dir / "pyproject.toml"
-    if not pyproject.is_file():
-        return False
-    if shutil.which("uv") is None:
-        raise SystemExit("workspace has pyproject.toml, but uv was not found in PATH")
-
-    print(f"Preparing Python environment from {rel(pyproject)}", flush=True)
-    if sandbox and shutil.which("bwrap") is not None:
-        prepare_workspace_python_env_in_namespace(workspace_dir, runtime_dir)
-    else:
-        prepare_workspace_python_env_on_host(workspace_dir, runtime_dir)
-    return True
-
-
-def prepare_workspace_python_env_on_host(workspace_dir: Path, runtime_dir: Path) -> None:
-    python_install_dir = runtime_dir / "python"
-    env = os.environ.copy()
-    env.pop("UV_NO_SYNC", None)
-    env["UV_PYTHON_INSTALL_DIR"] = str(python_install_dir)
-    subprocess.run(
-        ["uv", "python", "install", PYTHON_VERSION],
-        cwd=workspace_dir,
-        env=env,
-        check=True,
-    )
-    python = first_python(python_install_dir, PYTHON_VERSION)
-    subprocess.run(
-        [
-            "uv",
-            "sync",
-            "--python",
-            str(python),
-            "--no-install-project",
-            "--no-dev",
-            "--link-mode",
-            "copy",
-        ],
-        cwd=workspace_dir,
-        env=env,
-        check=True,
-    )
-
-
-def prepare_workspace_python_env_in_namespace(workspace_dir: Path, runtime_dir: Path) -> None:
-    uv = shutil.which("uv")
-    if uv is None:
-        raise SystemExit("workspace has pyproject.toml, but uv was not found in PATH")
-    common = python_setup_bwrap_args(workspace_dir, runtime_dir, uv)
-    env = os.environ.copy()
-    env.pop("UV_NO_SYNC", None)
-    env.pop("VIRTUAL_ENV", None)
-    subprocess.run(
-        common + ["--", "/sandbox-bin/uv", "python", "install", PYTHON_VERSION],
-        env=env,
-        check=True,
-    )
-    python = first_guest_python(runtime_dir / "python", PYTHON_VERSION)
-    subprocess.run(
-        common
-        + [
-            "--",
-            "/sandbox-bin/uv",
-            "sync",
-            "--python",
-            str(python),
-            "--no-install-project",
-            "--no-dev",
-            "--link-mode",
-            "copy",
-        ],
-        env=env,
-        check=True,
-    )
-
-
-def python_setup_bwrap_args(workspace_dir: Path, runtime_dir: Path, uv: str) -> list[str]:
-    args = [
-        "bwrap",
-        "--ro-bind",
-        "/usr",
-        "/usr",
-        "--ro-bind",
-        "/bin",
-        "/bin",
-        "--ro-bind",
-        "/sbin",
-        "/sbin",
-        "--ro-bind",
-        "/lib",
-        "/lib",
-        "--ro-bind",
-        "/etc",
-        "/etc",
-        "--ro-bind",
-        "/run",
-        "/run",
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--tmpfs",
-        "/tmp",
-        "--dir",
-        "/sandbox-bin",
-        "--ro-bind",
-        uv,
-        "/sandbox-bin/uv",
-        "--bind",
-        str(workspace_dir),
-        str(GUEST_WORKSPACE_DIR),
-        "--bind",
-        str(runtime_dir),
-        str(GUEST_RUNTIME_DIR),
-        "--chdir",
-        str(GUEST_WORKSPACE_DIR),
-        "--setenv",
-        "PATH",
-        "/sandbox-bin:/usr/local/bin:/usr/bin:/bin",
-        "--setenv",
-        "UV_PYTHON_INSTALL_DIR",
-        str(GUEST_PYTHON_INSTALL_DIR),
-    ]
-    if Path("/lib64").is_dir():
-        args.extend(["--ro-bind", "/lib64", "/lib64"])
-    if Path("/mnt/wsl/resolv.conf").is_file():
-        args.extend(["--ro-bind", "/mnt/wsl/resolv.conf", "/mnt/wsl/resolv.conf"])
-    return args
-
-
-def first_python(python_install_dir: Path, version: str) -> Path:
-    candidates = sorted(python_install_dir.glob(f"cpython-{version}*/bin/python{version}"))
-    if not candidates:
-        raise SystemExit(f"uv did not install Python {version} in {python_install_dir}")
-    return candidates[-1]
-
-
-def first_guest_python(host_python_install_dir: Path, version: str) -> Path:
-    host_python = first_python(host_python_install_dir, version)
-    rel_path = host_python.relative_to(host_python_install_dir)
-    return GUEST_PYTHON_INSTALL_DIR / rel_path
 
 
 def render_prompt(template_path: Path, values: dict[str, str]) -> str:
@@ -295,12 +160,6 @@ def format_duration(seconds: int) -> str:
     return f"{seconds}s"
 
 
-def script_hint(path: Path) -> str:
-    if not path.is_file():
-        return "(script not written)"
-    return f"bash {shlex.quote(str(path))}"
-
-
 def remove_host_launch_artifacts(*paths: Path) -> None:
     for path in paths:
         try:
@@ -339,7 +198,6 @@ def print_run_summary(
     run_dir: Path,
     recordings_dir: Path,
     workspace_dir: Path,
-    python_env_ready: bool,
     session: str,
     backend: str,
     model: str,
@@ -362,7 +220,7 @@ def print_run_summary(
     print("Windows:   world-0 (server), agent-0-0 (agent)", flush=True)
     print(f"Results:   {rel(run_dir)}", flush=True)
     print(f"Workspace: {rel(workspace_dir)}", flush=True)
-    if python_env_ready:
+    if (workspace_dir / ".venv").is_dir():
         print(f"Python:    {rel(workspace_dir / '.venv')} ready", flush=True)
     print(f"Logs:      {rel(Path(started_world.log_file))}", flush=True)
     print(f"           {rel(Path(started_agent.agent_dir) / 'logs' / 'agent.log')}", flush=True)
@@ -418,7 +276,6 @@ def main() -> None:
         path.mkdir(parents=True, exist_ok=True)
 
     copy_template(args.template if args.template.is_absolute() else ROOT / args.template, workspace_dir)
-    python_env_ready = prepare_workspace_python_env(workspace_dir, runtime_dir, sandbox=args.sandbox)
     copy_world_source(world_dir, workspace_dir / "world")
 
     world = World(dir=world_dir)
@@ -465,21 +322,11 @@ def main() -> None:
             },
         )
         initial_prompt = args.goal or "Begin"
-        agent_env = {"WORKSPACE_DIR": str(workspace_dir)}
-        if python_env_ready:
-            venv = GUEST_WORKSPACE_DIR / ".venv" if args.sandbox else workspace_dir / ".venv"
-            host_path = "/usr/local/bin:/usr/bin:/bin" if args.sandbox else os.environ.get("PATH", "")
-            agent_env.update(
-                {
-                    "VIRTUAL_ENV": str(venv),
-                    "PATH": f"{venv / 'bin'}:{host_path}",
-                    "PYTHONNOUSERSITE": "1",
-                }
-            )
+        agent_env = claude_auth_env()
         started_agent = agent.start(
             initial_prompt=initial_prompt,
             system_prompt=system_prompt,
-            env=agent_env,
+            env=agent_env or None,
         )
         remove_host_launch_artifacts(
             Path(started_world.command_file),
@@ -498,7 +345,6 @@ def main() -> None:
             run_dir=run_dir,
             recordings_dir=recordings_dir,
             workspace_dir=workspace_dir,
-            python_env_ready=python_env_ready,
             session=session,
             backend=backend,
             model=model,
