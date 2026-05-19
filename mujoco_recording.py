@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,13 +67,16 @@ def replay_manifest_path(recording_path: Path) -> Path:
 
 def write_replay_manifest(recording_path: Path) -> Path:
     manifest_path = replay_manifest_path(recording_path)
+    manifest_dir = recording_path.parent
+    project_arg = os.path.relpath(ROOT, manifest_dir)
+    replay_script = os.path.relpath(ROOT / "replay.py", manifest_dir)
     command = [
         "uv",
         "run",
         "--project",
-        str(ROOT),
+        project_arg,
         "python",
-        str(ROOT / "run_web_replay.py"),
+        replay_script,
         "{recording}",
         "--port",
         "{port}",
