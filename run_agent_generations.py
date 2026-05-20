@@ -36,7 +36,7 @@ CHAIN_HEADER = [
 
 HEALTH_TIMEOUT_SECONDS = int(os.environ.get("HEALTH_TIMEOUT", "30"))
 PORT_WAIT_SECONDS = int(os.environ.get("PORT_WAIT_SECONDS", "120"))
-STOP_GRACE_SECONDS = int(os.environ.get("STOP_GRACE_SECONDS", "10"))
+STOP_GRACE_SECONDS = int(os.environ.get("STOP_GRACE_SECONDS", "1"))
 SAVE_GRACE_SECONDS = int(os.environ.get("SAVE_GRACE_SECONDS", "300"))
 GENERATION_RETRIES = int(os.environ.get("MAX_GENERATION_RETRIES", "3"))
 RETRY_DELAY_SECONDS = int(os.environ.get("RETRY_DELAY_SECONDS", "15"))
@@ -211,13 +211,12 @@ def run_generation(args: argparse.Namespace, *, generation: int, template: Path,
         raise RuntimeError(f"run directory already exists: {run_dir}")
 
     agent_name = safe_name(f"Eko-r{run_id}-w0-a0")
-    world_root = run_dir / "worlds" / "world-0"
-    agent_dir = world_root / "agents" / agent_name
+    agent_dir = run_dir / "agents" / agent_name
     workspace = agent_dir / "workspace"
-    runtime = agent_dir / "runtime"
-    recordings = world_root / "recordings"
-    logs = world_root / "logs"
-    for path in (workspace, runtime, recordings, logs):
+    world_runtime = run_dir / "runtime"
+    recordings = run_dir / "recordings"
+    logs = run_dir / "logs"
+    for path in (workspace, world_runtime, recordings, logs):
         path.mkdir(parents=True, exist_ok=True)
 
     copy_workspace(template, workspace, world_dir)
@@ -242,7 +241,7 @@ def run_generation(args: argparse.Namespace, *, generation: int, template: Path,
             record_dir=recordings,
             health_timeout=HEALTH_TIMEOUT_SECONDS,
             port_wait=PORT_WAIT_SECONDS,
-            command_file=runtime / "world.sh",
+            command_file=world_runtime / "world.sh",
             log_file=logs / "world.log",
             _tmux_session=tmux_session,
         )

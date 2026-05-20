@@ -57,45 +57,38 @@ def timestamped_recording_path(record_dir: Path) -> Path:
     return record_dir / f"{stamp}.h5"
 
 
-def _toml_string(value: str) -> str:
-    return json.dumps(value)
+def register_recording_with_clawblox_manifest(recording_path: Path) -> None:
+    manifest_env = os.environ.get("CLAWBLOX_MANIFEST_PATH", "").strip()
+    if not manifest_env:
+        return
 
+    manifest_path = Path(manifest_env)
+    state_root = manifest_path.parent.parent
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        manifest = {"schema_version": 1}
+    except json.JSONDecodeError:
+        return
 
-def replay_manifest_path(recording_path: Path) -> Path:
-    return recording_path.with_suffix(".replay.toml")
+    def path_value(path: Path) -> str:
+        try:
+            return str(path.resolve().relative_to(state_root.resolve()))
+        except ValueError:
+            return str(path)
 
-
-def write_replay_manifest(recording_path: Path) -> Path:
-    manifest_path = replay_manifest_path(recording_path)
-    manifest_dir = recording_path.parent
-    project_arg = os.path.relpath(ROOT, manifest_dir)
-    replay_script = os.path.relpath(ROOT / "replay.py", manifest_dir)
-    command = [
-        "uv",
-        "run",
-        "--project",
-        project_arg,
-        "python",
-        replay_script,
-        "{recording}",
-        "--port",
-        "{port}",
-    ]
-    lines = [
-        "version = 1",
-        'format = "mujoco-h5"',
-        f"recording = {_toml_string(recording_path.name)}",
-        f"events = {_toml_string(recording_path.with_suffix('.events.jsonl').name)}",
-        "",
-        "command = [",
-    ]
-    lines.extend(f"  {_toml_string(item)}," for item in command)
-    lines.extend([
-        "]",
-        "",
-    ])
-    manifest_path.write_text("\n".join(lines), encoding="utf-8")
-    return manifest_path
+    recording = {
+        "path": path_value(recording_path),
+        "events": path_value(recording_path.with_suffix(".events.jsonl")),
+        "format": "mujoco-h5",
+    }
+    recordings = manifest.setdefault("recordings", [])
+    if not any(item.get("path") == recording["path"] for item in recordings):
+        recordings.append(recording)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = manifest_path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(manifest_path)
 
 
 @dataclass(frozen=True)
@@ -134,7 +127,6 @@ class RecordingWriter:
         h5py = _require_h5py()
         self.path = path
         self.events_path = path.with_suffix(".events.jsonl")
-        self.replay_manifest_path = replay_manifest_path(path)
         self.scene = scene
         self.config = config or RecordingConfig()
         self.state_sig = default_state_sig()
@@ -154,7 +146,7 @@ class RecordingWriter:
         self.events_file = self.events_path.open("a", encoding="utf-8")
         self._write_attrs(model)
         self._create_datasets(model)
-        write_replay_manifest(path)
+        register_recording_with_clawblox_manifest(path)
 
     def record_initial(self, tick: int, model: mujoco.MjModel, data: mujoco.MjData) -> None:
         self.record_step(tick, model, data, force=True)

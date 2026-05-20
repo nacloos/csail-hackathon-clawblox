@@ -145,56 +145,6 @@ def read_events(path: Path) -> list[dict]:
     return events
 
 
-def toml_string(value: str) -> str:
-    return json.dumps(value)
-
-
-def latest_agent_transcript(agent_dir: Path) -> Path | None:
-    session_dir = agent_dir / "session"
-    transcripts = sorted(
-        session_dir.glob("*.jsonl"),
-        key=lambda path: path.stat().st_mtime if path.exists() else 0,
-        reverse=True,
-    )
-    if transcripts:
-        return transcripts[0]
-    return None
-
-
-def enrich_replay_manifests(world_root: Path) -> None:
-    agents_dir = world_root / "agents"
-    recordings_dir = world_root / "recordings"
-    if not agents_dir.is_dir() or not recordings_dir.is_dir():
-        return
-
-    agents = []
-    for agent_dir in sorted(path for path in agents_dir.iterdir() if path.is_dir()):
-        transcript = latest_agent_transcript(agent_dir)
-        if transcript is None:
-            continue
-        agents.append((agent_dir.name, transcript))
-    if not agents:
-        return
-
-    for manifest in sorted(recordings_dir.glob("*.replay.toml")):
-        raw = manifest.read_text(encoding="utf-8")
-        if "[[agents]]" in raw:
-            continue
-        lines = [raw.rstrip(), ""]
-        for agent_id, transcript in agents:
-            rel_transcript = os.path.relpath(transcript, manifest.parent)
-            lines.extend(
-                [
-                    "[[agents]]",
-                    f"id = {toml_string(agent_id)}",
-                    f"name = {toml_string(agent_id)}",
-                    f"transcript = {toml_string(rel_transcript)}",
-                    "",
-                ]
-            )
-        manifest.write_text("\n".join(lines), encoding="utf-8")
-
-
 def agent_failure_diagnostics(agent_dir: Path) -> str:
     events_file = agent_dir / "events.jsonl"
     runtime_dir = agent_dir / "runtime"
@@ -428,13 +378,12 @@ def main() -> None:
             raise SystemExit(f"run directory already exists: {run_dir} (use --force to replace it)")
         shutil.rmtree(run_dir)
 
-    world_root = run_dir / "worlds" / "world-0"
-    agent_dir = world_root / "agents" / args.agent_name
+    agent_dir = run_dir / "agents" / args.agent_name
     workspace_dir = agent_dir / "workspace"
-    runtime_dir = agent_dir / "runtime"
-    recordings_dir = world_root / "recordings"
-    logs_dir = world_root / "logs"
-    for path in (workspace_dir, runtime_dir, recordings_dir, logs_dir):
+    world_runtime_dir = run_dir / "runtime"
+    recordings_dir = run_dir / "recordings"
+    logs_dir = run_dir / "logs"
+    for path in (workspace_dir, world_runtime_dir, recordings_dir, logs_dir):
         path.mkdir(parents=True, exist_ok=True)
 
     copy_template(args.template if args.template.is_absolute() else ROOT / args.template, workspace_dir)
@@ -463,7 +412,7 @@ def main() -> None:
             record_dir=recordings_dir,
             health_timeout=HEALTH_TIMEOUT_SECONDS,
             port_wait=PORT_WAIT_SECONDS,
-            command_file=runtime_dir / "world.sh",
+            command_file=world_runtime_dir / "world.sh",
             log_file=logs_dir / "world.log",
             _tmux_session=tmux_session,
         )
@@ -526,8 +475,6 @@ def main() -> None:
         if started_agent is not None:
             agent.stop(grace_seconds=STOP_GRACE_SECONDS)
         world.stop(grace_seconds=STOP_GRACE_SECONDS)
-        if args.record:
-            enrich_replay_manifests(world_root)
 
 
 if __name__ == "__main__":

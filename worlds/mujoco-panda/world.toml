@@ -11,5 +11,13 @@ command = [
   "--scene", "models/panda_cube/scene.xml",
 ]
 
+[replay]
+command = [
+  "uv", "run", "--project", "../..",
+  "python", "../../replay.py",
+  "{recording}",
+  "--port", "{port}",
+]
+
 [agent]
 source_workspace = true

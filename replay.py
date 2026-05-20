@@ -1,19 +1,24 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import http.client
 import signal
 import socket
 import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import mujoco
 import uvicorn
 import viser
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, Response
 from mjviser.scene import ViserMujocoScene
+import websockets
 
 from mujoco_recording import RecordingReader
 
@@ -85,6 +90,7 @@ class MujocoReplayAdapter:
                 "paused": bool(self.paused),
                 "skip_idle": bool(self.skip_idle),
                 "pause_at_tick": self.pause_at_tick,
+                "viewer_url": self.viewer_url,
             }
 
     def seek(self, tick: int) -> None:
@@ -224,6 +230,83 @@ class MujocoReplayAdapter:
 def create_app(adapter: MujocoReplayAdapter) -> FastAPI:
     app = FastAPI()
 
+    def viewer_target(path: str = "") -> str:
+        target = adapter.viewer_url.rstrip("/")
+        if path:
+            target = f"{target}/{path.lstrip('/')}"
+        return target
+
+    def proxy_viewer_http(path: str = "") -> Response:
+        url = viewer_target(path)
+        parsed = urlsplit(url)
+        conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=10)
+        request_path = parsed.path or "/"
+        if parsed.query:
+            request_path = f"{request_path}?{parsed.query}"
+        try:
+            conn.request("GET", request_path, headers={"Accept-Encoding": "identity"})
+            resp = conn.getresponse()
+            body = resp.read()
+            headers = {}
+            for name, value in resp.getheaders():
+                lower = name.lower()
+                if lower in {"content-type", "cache-control", "etag", "last-modified"}:
+                    headers[name] = value
+            return Response(content=body, status_code=resp.status, headers=headers)
+        finally:
+            conn.close()
+
+    async def proxy_viewer_websocket(websocket: WebSocket, path: str = "") -> None:
+        suffix = f"/{path.lstrip('/')}" if path else ""
+        upstream_url = adapter.viewer_url.replace("http://", "ws://", 1).replace(
+            "https://", "wss://", 1
+        ).rstrip("/") + suffix
+        if websocket.url.query:
+            upstream_url = f"{upstream_url}?{websocket.url.query}"
+        requested_protocols = websocket.headers.get("sec-websocket-protocol", "")
+        protocols = [item.strip() for item in requested_protocols.split(",") if item.strip()]
+        selected_protocol = protocols[0] if protocols else None
+        await websocket.accept(subprotocol=selected_protocol)
+        try:
+            async with websockets.connect(
+                upstream_url,
+                subprotocols=protocols or None,
+                max_size=50 * 1024 * 1024,
+                compression=None,
+            ) as upstream:
+                async def browser_to_upstream() -> None:
+                    while True:
+                        message = await websocket.receive()
+                        msg_type = message.get("type")
+                        if msg_type == "websocket.disconnect":
+                            await upstream.close()
+                            return
+                        if "bytes" in message and message["bytes"] is not None:
+                            await upstream.send(message["bytes"])
+                        elif "text" in message and message["text"] is not None:
+                            await upstream.send(message["text"])
+
+                async def upstream_to_browser() -> None:
+                    async for message in upstream:
+                        if isinstance(message, bytes):
+                            await websocket.send_bytes(message)
+                        else:
+                            await websocket.send_text(message)
+
+                done, pending = await asyncio.wait(
+                    {
+                        asyncio.create_task(browser_to_upstream()),
+                        asyncio.create_task(upstream_to_browser()),
+                    },
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                for task in done:
+                    task.result()
+        except (WebSocketDisconnect, websockets.ConnectionClosed):
+            return
+
     @app.get("/")
     def root() -> dict[str, Any]:
         return {"ok": True, "viewer_url": adapter.viewer_url}
@@ -248,9 +331,28 @@ def create_app(adapter: MujocoReplayAdapter) -> FastAPI:
   </style>
 </head>
 <body>
-  <iframe src="{adapter.viewer_url}" title="MuJoCo replay"></iframe>
+  <iframe src="./viewer/" title="MuJoCo replay"></iframe>
 </body>
 </html>"""
+
+    @app.get("/replay/viewer")
+    def replay_viewer_root() -> Response:
+        return proxy_viewer_http()
+
+    @app.get("/replay/viewer/{path:path}")
+    def replay_viewer_path(path: str, request: Request) -> Response:
+        target_path = path
+        if request.url.query:
+            target_path = f"{target_path}?{request.url.query}"
+        return proxy_viewer_http(target_path)
+
+    @app.websocket("/replay/viewer")
+    async def replay_viewer_ws_root(websocket: WebSocket) -> None:
+        await proxy_viewer_websocket(websocket)
+
+    @app.websocket("/replay/viewer/{path:path}")
+    async def replay_viewer_ws_path(websocket: WebSocket, path: str) -> None:
+        await proxy_viewer_websocket(websocket, path)
 
     @app.get("/replay/info")
     def replay_info() -> dict[str, Any]:
