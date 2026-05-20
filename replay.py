@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import http.client
+import json
 import signal
 import socket
 import threading
@@ -58,6 +59,7 @@ class MujocoReplayAdapter:
         self.total_tick = self.reader.total_tick()
         self.tick_rate = max(1, round(1.0 / self.meta.timestep))
         self.duration_ms = round((self.total_tick / self.tick_rate) * 1000)
+        self.active_ranges = self._load_active_ranges()
         self.speed = max(0.05, float(speed))
         self.paused = bool(paused)
         self.loop = bool(loop)
@@ -96,6 +98,7 @@ class MujocoReplayAdapter:
     def seek(self, tick: int) -> None:
         with self._lock:
             self.current_tick = min(max(0, int(tick)), self.total_tick)
+            self._skip_idle_gap_locked()
             self._last_wall_time = time.perf_counter()
             self._apply_current_frame_locked()
             self._sync_viewer_gui_locked()
@@ -121,9 +124,60 @@ class MujocoReplayAdapter:
             self.current_tick = min(max(0, int(start_tick)), self.total_tick)
             self.pause_at_tick = min(max(self.current_tick, int(end_tick)), self.total_tick)
             self.paused = False
+            self._skip_idle_gap_locked()
+            self._apply_pause_bound_locked()
             self._last_wall_time = time.perf_counter()
             self._apply_current_frame_locked()
             self._sync_viewer_gui_locked()
+
+    def set_skip_idle(self, enabled: bool) -> None:
+        with self._lock:
+            self.skip_idle = bool(enabled)
+            self._skip_idle_gap_locked()
+            self._last_wall_time = time.perf_counter()
+            self._apply_current_frame_locked()
+            self._sync_viewer_gui_locked()
+
+    def _load_active_ranges(self) -> list[tuple[int, int]]:
+        events_path = self.meta.events_path
+        if not events_path.is_file():
+            return []
+
+        action_ticks: list[int] = []
+        with events_path.open("r", encoding="utf-8") as events_file:
+            for line in events_file:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") != "SetControl":
+                    continue
+                tick = event.get("tick")
+                if isinstance(tick, int):
+                    action_ticks.append(min(max(0, tick), self.total_tick))
+
+        if not action_ticks:
+            return []
+
+        # Keep a short pre-roll before each control update so the agent tool call
+        # that caused the action can appear before the world starts moving.
+        pre_roll_ticks = max(1, round(2.0 * self.tick_rate))
+        post_roll_ticks = max(1, round(1.0 * self.tick_rate))
+        merge_gap_ticks = max(1, round(1.0 * self.tick_rate))
+        ranges: list[tuple[int, int]] = []
+
+        for tick in sorted(set(action_ticks)):
+            start = max(0, tick - pre_roll_ticks)
+            end = min(self.total_tick, tick + post_roll_ticks)
+            if ranges and start <= ranges[-1][1] + merge_gap_ticks:
+                ranges[-1] = (ranges[-1][0], max(ranges[-1][1], end))
+            else:
+                ranges.append((start, end))
+
+        return ranges
 
     def _setup_viewer_gui(self) -> None:
         self.server.gui.add_markdown(
@@ -185,6 +239,8 @@ class MujocoReplayAdapter:
             self._sync_viewer_gui_locked()
             return
 
+        self._skip_idle_gap_locked()
+
         if self.current_tick >= self.total_tick:
             if self.loop:
                 self.current_tick = 0
@@ -194,13 +250,43 @@ class MujocoReplayAdapter:
             delta = max(1, round(elapsed * self.tick_rate * self.speed))
             self.current_tick = min(self.total_tick, self.current_tick + delta)
 
+        self._skip_idle_gap_locked()
+        self._apply_pause_bound_locked()
+
+        self._apply_current_frame_locked()
+        self._sync_viewer_gui_locked()
+
+    def _apply_pause_bound_locked(self) -> None:
         if self.pause_at_tick is not None and self.current_tick >= self.pause_at_tick:
             self.current_tick = self.pause_at_tick
             self.pause_at_tick = None
             self.paused = True
 
-        self._apply_current_frame_locked()
-        self._sync_viewer_gui_locked()
+    def _skip_idle_gap_locked(self) -> None:
+        if (
+            not self.skip_idle
+            or self.current_tick >= self.total_tick
+            or not self.active_ranges
+            or self._is_active_tick_locked(self.current_tick)
+        ):
+            return
+        next_tick = self._next_active_tick_after_locked(self.current_tick)
+        self.current_tick = self.total_tick if next_tick is None else next_tick
+
+    def _is_active_tick_locked(self, tick: int) -> bool:
+        for start, end in self.active_ranges:
+            if tick < start:
+                return False
+            if start <= tick <= end:
+                return True
+        return False
+
+    def _next_active_tick_after_locked(self, tick: int) -> int | None:
+        for start, end in self.active_ranges:
+            if end <= tick:
+                continue
+            return start
+        return None
 
     def _apply_current_frame_locked(self) -> None:
         frame = self.reader.preview_at_tick(self.current_tick)
@@ -380,7 +466,7 @@ def create_app(adapter: MujocoReplayAdapter) -> FastAPI:
 
     @app.post("/replay/skip-idle")
     def replay_skip_idle(enabled: bool = False) -> dict[str, bool]:
-        adapter.skip_idle = bool(enabled)
+        adapter.set_skip_idle(enabled)
         return {"ok": True}
 
     @app.post("/replay/play-range")
