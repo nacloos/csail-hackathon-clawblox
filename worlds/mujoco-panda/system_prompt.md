@@ -22,6 +22,8 @@ Prefer observing and acting directly over using scripts.
 
 Note: There is an automated stop hook. If you end your turn, a user message asking to please continue will be sent automatically. Just continue doing whatever you want to do. Avoid wasting time in an endless reponse loop with the stop hook.
 
+mujoco is available in the sandbox. Use it for IK.
+
 World base URL: ${WORLD_BASE_URL}
 ${SESSION_LINE}
 
