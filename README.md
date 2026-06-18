@@ -22,6 +22,21 @@ The Panda model is vendored from MuJoCo Menagerie under
 
 ## Setup
 
+Install the Clawblox CLI from the `dev` branch:
+
+```bash
+git clone --branch dev https://github.com/nacloos/clawblox.git
+cd clawblox
+cargo install --path .
+clawblox --help
+```
+
+This requires a working Rust/Cargo toolchain. Use the `dev` branch because this
+repo may depend on Clawblox changes that have not reached the default install
+script yet.
+
+Then install the Python dependencies for these MuJoCo worlds:
+
 ```bash
 uv sync
 ```
