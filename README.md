@@ -38,6 +38,17 @@ Each generation runs in its own tmux session (`<tmux-prefix>-g001`, ...). Use
 `tmux ls` to list them and `tmux kill-session -t <session>` to stop one.
 Results are written under `worlds/<world>/results/<experiment-id>/`.
 
+### Multiple agents
+
+Use `--agents-per-world` to run several agents in the same world. The world must
+have one controllable robot per agent — each agent is assigned its own
+controller, and requesting more agents than controllers fails. The two-arm
+`mujoco-dual-panda` world supports two agents:
+
+```bash
+uv run run_agent_generations.py --agents-per-world 2 --generations 4 --generation-duration 5h --base-port 8185 --tmux-prefix claude-1 --world-dir worlds/mujoco-dual-panda
+```
+
 ## Replay
 
 Browse a world's recordings and open them in the replay UI:
