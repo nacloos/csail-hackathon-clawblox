@@ -1,6 +1,6 @@
 # MuJoCo Clawblox Worlds
 
-MuJoCo worlds plus runners for driving Claude agents against HTTP-controlled
+MuJoCo worlds plus runners for driving agents against HTTP-controlled
 simulations. Worlds live under `worlds/`, each with its own `world.toml`, system
 prompt, API docs, and scene assets.
 
