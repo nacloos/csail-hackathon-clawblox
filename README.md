@@ -28,7 +28,7 @@ CLAUDE_CODE_OAUTH_TOKEN=...
 
 ## Running Agents
 
-Run a generation chain on a world:
+Run agents on a world:
 
 ```bash
 uv run run_agent_generations.py --generations 4 --generation-duration 5h --base-port 8185 --tmux-prefix claude-1 --world-dir worlds/mujoco-panda-2
