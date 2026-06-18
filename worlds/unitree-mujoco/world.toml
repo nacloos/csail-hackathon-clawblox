@@ -1,0 +1,17 @@
+name = "Unitree MuJoCo"
+description = "Unitree G1 MuJoCo simulation with DDS control and MJViser visualization."
+
+[runtime]
+mode = "external"
+
+[run]
+command = [
+  "bash", "-lc",
+  "conda_base=$(conda info --base) && unset VIRTUAL_ENV && exec \"$conda_base/envs/unitree-mujoco/bin/python\" server.py --enable-cmd-vel",
+]
+
+[agent]
+source_workspace = false
+
+[sandbox]
+allow_loopback = true

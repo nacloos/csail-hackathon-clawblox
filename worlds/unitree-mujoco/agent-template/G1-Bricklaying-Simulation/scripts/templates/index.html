@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+<style>
+
+td{
+  cursor:pointer;
+  padding: 15px 32px;
+  text-align: center;
+  display: inline-block;
+  font-size: 16px;
+  margin: 4px 2px;
+  user-select: none;
+}
+
+table{
+  user-select: none;
+}
+</style>
+
+<script language="JavaScript">
+var button_colours = ["#FFFFFF", "#999999", "#990000"];
+
+function setColor(el) {
+    el.style.backgroundColor = button_colours[(el.colourIdx + 1) % button_colours.length];
+    el.colourIdx = (el.colourIdx + 1) % button_colours.length;
+}
+
+function border_update(){
+    console.log("border update");
+    cells = document.getElementsByTagName("td");
+    console.log(cells);
+    console.log("flushing all borders..")
+    for(i=0; i<9; i++){
+      cells[i].style.border = "solid 1px white";
+    }
+    console.log("setting highlights");
+    for(col = 0; col < 3; col++){
+      for(row = 2; row >= 0; row--){
+        console.log("colour of cell " + (3*row + col) + "is : " + cells[3*row + col].colourIdx) 
+        
+        if(cells[3*row + col].colourIdx == 0){
+          cells[3*row + col].style.border = "dashed 1px black";
+          break;
+        }
+        
+      }
+    }
+    
+    
+}
+
+function setColor_adv(el) {
+    col = el.cellIndex;
+    row = el.parentNode.rowIndex;
+    
+    if(el.colourIdx == 0){
+        console.log("clicked to spawn new brick..")
+        console.log("in row: " + row)
+        if(row != 2){
+          console.log("trying to place not in bottom row..")
+          table_body = el.parentNode.parentNode;
+          console.log(table_body)
+          rows = table_body.getElementsByTagName("tr");
+          row_below = rows[row+1];
+          console.log(row_below)
+          
+          cell_row_below = row_below.getElementsByTagName("td");
+          cell_below = cell_row_below[col]
+          console.log(cell_below)
+          console.log("colour of brick below: " + cell_below.colourIdx)
+          if(cell_below.colourIdx == 0){
+              console.log("error placing, space below is empty")
+          }
+          else{
+          el.style.backgroundColor = button_colours[1];
+          el.colourIdx = 1;
+          }
+        }
+        else{
+          el.style.backgroundColor = button_colours[1];
+          el.colourIdx = 1;
+        }
+        
+    }
+    else if(el.colourIdx == button_colours.length-1){
+        console.log("attempting to remove brick..");
+        el.colourIdx = 0;
+        el.style.backgroundColor = button_colours[el.colourIdx];
+        if(row != 0){
+            table_body = el.parentNode.parentNode;
+            rows = table_body.getElementsByTagName("tr");
+            row_above = rows[row-1];
+            cell_row_above = row_above.getElementsByTagName("td");
+            cell_above = cell_row_above[col]
+            console.log("cell above: " + cell_above)
+            for(i = cell_above.colourIdx; i<=button_colours.length-1; i++){
+               setColor_adv(cell_above);
+            }
+        }
+    }
+    else{
+    el.colourIdx = (el.colourIdx + 1) % button_colours.length;
+    el.style.backgroundColor = button_colours[el.colourIdx];
+    }
+    
+}
+
+function tableSetup() {
+   cells = document.getElementsByTagName("td");
+   for( const cell of cells)
+   {
+      cellInit(cell);
+   }
+}
+
+function cellInit(el) {
+    el.colourIdx = 0;
+    el.style.backgroundColor = button_colours[0];
+}
+
+function sendBrickLayout() {
+console.log("sending POST..")
+
+const brick_layout = []
+cells = document.getElementsByTagName("td");
+for(i = 0; i < cells.length; i++){
+brick_layout.push(cells[i].colourIdx)
+}
+console.log("payload: " + brick_layout)
+
+var xhr = new XMLHttpRequest();
+xhr.open("POST", {{url_for('server_process_layout')}}, true);
+xhr.setRequestHeader('Content-Type', 'application/json');
+xhr.send(JSON.stringify({brick_values: brick_layout}));
+}
+</script>
+
+<body onload="tableSetup(); border_update()">
+<h1>Machine Mosaic</h1>
+<p>What pattern would you like me to build for you?</p>
+<p>Press on a space to cycle between no brick, orange bricks, and grey bricks. You won't be able to place a brick on a spot that doesn't have a brick underneath it</p>
+<p>When you're satisfied with your pattern, press the button below to build! Or reset to build a new pattern.</p>
+<table onclick="border_update()">
+  <tr>
+    <td onclick="setColor_adv(this)"></td>
+    <td onclick="setColor_adv(this)"></td>
+    <td onclick="setColor_adv(this)"></td>
+  </tr>
+  <tr>
+    <td onclick="setColor_adv(this)"></td>
+    <td onclick="setColor_adv(this)"></td>
+    <td onclick="setColor_adv(this)"></td>
+  </tr>
+  <tr>
+    <td onclick="setColor_adv(this)"></td>
+    <td onclick="setColor_adv(this)"></td>
+    <td onclick="setColor_adv(this)"></td>
+  </tr>
+</table> 
+ <button onclick="sendBrickLayout()">I'm Ready, Let's Build It!</button> 
+</body>
+</html>

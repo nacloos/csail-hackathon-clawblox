@@ -1,0 +1,23 @@
+name = "MuJoCo G1 Dex3"
+description = "Unitree G1 humanoid with dual Dex3 dexterous hands."
+
+[runtime]
+mode = "external"
+
+[run]
+command = [
+  "uv", "run", "--project", "../..",
+  "python", "../../server.py",
+  "--scene", "models/g1/scene_hands_modified.xml",
+]
+
+[replay]
+command = [
+  "uv", "run", "--project", "../..",
+  "python", "../../replay.py",
+  "{recording}",
+  "--port", "{port}",
+]
+
+[agent]
+source_workspace = true

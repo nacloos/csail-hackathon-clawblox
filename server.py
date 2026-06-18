@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import importlib.util
+import json
 import os
 from pathlib import Path
 import threading
 import time
 from uuid import uuid4
 from typing import Any
+
+import numpy as np
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -25,6 +30,8 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8080
 DEFAULT_SPECTATOR_PORT_OFFSET = 1000
 DEFAULT_RECORD_DIR = ROOT / "recordings"
+DUAL_SCENE_HELPER = ROOT / "worlds" / "mujoco-dual-panda" / "dual_panda_scene.py"
+DUAL_SCENE = ROOT / "worlds" / "mujoco-dual-panda" / "models" / "generated_scene.xml"
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -81,8 +88,26 @@ ACTUATOR_TRANSMISSION_TYPES = {
     int(mujoco.mjtTrn.mjTRN_BODY): "body",
 }
 
-from dual_panda_scene import DUAL_SCENE, ensure_dual_panda_scene
-from mujoco_recording import RecordingConfig, RecordingWriter, timestamped_recording_path
+from mujoco_recording import (
+    RecordingConfig,
+    RecordingWriter,
+    capture_state,
+    default_state_sig,
+    restore_state,
+    scene_hash,
+    timestamped_recording_path,
+)
+
+SNAPSHOT_FORMAT = "mujoco-state-v1"
+
+
+def ensure_dual_panda_scene(path: Path = DUAL_SCENE) -> Path:
+    spec = importlib.util.spec_from_file_location("mujoco_dual_panda_scene", DUAL_SCENE_HELPER)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load dual Panda scene helper: {DUAL_SCENE_HELPER}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.ensure_dual_panda_scene(path)
 
 
 @dataclass(frozen=True)
@@ -190,8 +215,11 @@ class SimState:
         *,
         record_path: Path | None = None,
         record_config: RecordingConfig | None = None,
+        resume_path: Path | None = None,
     ) -> None:
         self.scene = scene.resolve()
+        self.scene_hash = scene_hash(self.scene)
+        self.state_sig = default_state_sig()
         self.model = mujoco.MjModel.from_xml_path(str(self.scene))
         self.data = mujoco.MjData(self.model)
         self.lock = threading.RLock()
@@ -208,13 +236,17 @@ class SimState:
         self.body_names = self._names(mujoco.mjtObj.mjOBJ_BODY, self.model.nbody)
         self.control_groups = self.find_control_groups_locked()
         self.control_groups_by_name = {group.name: group for group in self.control_groups}
-        self.object_body_ids = [
-            body_id
-            for body_id, name in enumerate(self.body_names)
-            if name.startswith(("block_", "brick_", "plank_", "pillar_"))
-        ]
+        self.object_body_ids = self.find_object_body_ids_locked()
         self.sessions: dict[str, Session] = {}
         self.reset()
+        if resume_path is not None:
+            self.restore_snapshot(json.loads(Path(resume_path).read_text(encoding="utf-8")))
+            print(
+                f"Restored world state from snapshot: {resume_path} "
+                f"(tick={self.tick}, time={float(self.data.time):.3f}s, "
+                f"sessions={len(self.sessions)})",
+                flush=True,
+            )
         if record_path is not None:
             self.start_recording(record_path, record_config)
 
@@ -313,9 +345,14 @@ class SimState:
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
+            state = capture_state(self.model, self.data, self.state_sig)
             return {
+                "format": SNAPSHOT_FORMAT,
+                "scene_hash": self.scene_hash,
                 "tick": self.tick,
                 "time": float(self.data.time),
+                "state_sig": int(self.state_sig),
+                "state_b64": base64.b64encode(state.tobytes()).decode("ascii"),
                 "qpos": self.data.qpos.tolist(),
                 "qvel": self.data.qvel.tolist(),
                 "ctrl": self.data.ctrl.tolist(),
@@ -335,6 +372,47 @@ class SimState:
                     "messages": list(self.chat_messages),
                 },
             }
+
+    def restore_snapshot(self, doc: dict[str, Any]) -> None:
+        if doc.get("format") != SNAPSHOT_FORMAT:
+            raise SystemExit(
+                f"snapshot format {doc.get('format')!r} is not {SNAPSHOT_FORMAT!r}"
+            )
+        if doc.get("scene_hash") != self.scene_hash:
+            raise SystemExit(
+                "snapshot scene_hash does not match the loaded scene; "
+                "restoring into a different scene is not supported"
+            )
+        if int(doc.get("state_sig", -1)) != int(self.state_sig):
+            raise SystemExit(
+                f"snapshot state_sig {doc.get('state_sig')} does not match {int(self.state_sig)}"
+            )
+        state = np.frombuffer(base64.b64decode(doc["state_b64"]), dtype=np.float64)
+        expected = mujoco.mj_stateSize(self.model, self.state_sig)
+        if state.size != expected:
+            raise SystemExit(
+                f"snapshot state has {state.size} values, expected {expected}"
+            )
+        with self.lock:
+            restore_state(self.model, self.data, state, self.state_sig)
+            self.tick = int(doc.get("tick", 0))
+            self.sessions = {}
+            for entry in doc.get("sessions", []):
+                session = Session(
+                    entry.get("name", "agent"),
+                    entry.get("session"),
+                    entry.get("robot"),
+                )
+                if entry.get("agent_id"):
+                    session.agent_id = entry["agent_id"]
+                if entry.get("created_at") is not None:
+                    session.created_at = float(entry["created_at"])
+                if entry.get("last_seen") is not None:
+                    session.last_seen = float(entry["last_seen"])
+                self.sessions[session.session_id] = session
+            chat = doc.get("chat", {})
+            self.chat_next_seq = int(chat.get("next_seq", 0))
+            self.chat_messages = deque(chat.get("messages", []), maxlen=1000)
 
     def start_recording(
         self,
@@ -688,6 +766,20 @@ class SimState:
             names.append(name or f"{obj_type.name.lower()}_{obj_id}")
         return names
 
+    def find_object_body_ids_locked(self) -> list[int]:
+        object_body_ids: list[int] = []
+        free_joint_type = int(mujoco.mjtJoint.mjJNT_FREE)
+        for body_id in range(1, self.model.nbody):
+            joint_start = int(self.model.body_jntadr[body_id])
+            joint_count = int(self.model.body_jntnum[body_id])
+            geom_count = int(self.model.body_geomnum[body_id])
+            if geom_count <= 0:
+                continue
+            joint_ids = range(joint_start, joint_start + joint_count)
+            if any(int(self.model.jnt_type[joint_id]) == free_joint_type for joint_id in joint_ids):
+                object_body_ids.append(body_id)
+        return object_body_ids
+
     def reset_to_default_locked(self) -> None:
         key_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_KEY, "home")
         if key_id >= 0:
@@ -785,8 +877,12 @@ def create_app(
     def skill_doc() -> str:
         return api_doc_path.read_text()
 
+    operator_token = os.environ.get("WORLD_OPERATOR_TOKEN", "").strip()
+
     @app.get("/snapshot")
-    def snapshot() -> dict[str, Any]:
+    def snapshot(x_operator_token: str | None = Header(default=None)) -> dict[str, Any]:
+        if operator_token and x_operator_token != operator_token:
+            raise HTTPException(status_code=401, detail="snapshot requires X-Operator-Token")
         return sim.snapshot()
 
     @app.post("/record/start")
@@ -845,6 +941,12 @@ def main() -> None:
     parser.add_argument("--record-path", type=Path)
     parser.add_argument("--preview-hz", type=float, default=30.0)
     parser.add_argument("--checkpoint-seconds", type=float, default=1.0)
+    parser.add_argument(
+        "--resume",
+        type=Path,
+        default=env_path("WORLD_RESUME_PATH"),
+        help="Restore full world state from a snapshot file before serving.",
+    )
     args = parser.parse_args()
     api_doc = args.api_doc or (Path.cwd() / "API.md" if (Path.cwd() / "API.md").exists() else API_DOC)
     if not api_doc.is_absolute():
@@ -858,6 +960,9 @@ def main() -> None:
     scene = ensure_dual_panda_scene(DUAL_SCENE) if args.dual_panda else args.scene
     if not scene.is_absolute():
         scene = Path.cwd() / scene
+    resume_path = args.resume
+    if resume_path is not None and not resume_path.is_absolute():
+        resume_path = Path.cwd() / resume_path
     local_sim = SimState(
         scene,
         record_path=record_path,
@@ -865,6 +970,7 @@ def main() -> None:
             preview_hz=args.preview_hz,
             checkpoint_seconds=args.checkpoint_seconds,
         ),
+        resume_path=resume_path,
     )
     spectator = None
     if not args.no_spectator:

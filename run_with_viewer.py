@@ -9,16 +9,17 @@ import mujoco.viewer
 import uvicorn
 
 from mujoco_recording import RecordingConfig, timestamped_recording_path
-from dual_panda_scene import DUAL_SCENE, ensure_dual_panda_scene
 from server import (
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_RECORD_DIR,
     DEFAULT_SPECTATOR_PORT_OFFSET,
+    DUAL_SCENE,
     SCENE,
     LiveSpectator,
     SimState,
     create_app,
+    ensure_dual_panda_scene,
 )
 
 

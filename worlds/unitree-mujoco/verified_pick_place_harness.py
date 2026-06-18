@@ -7,6 +7,7 @@ import threading
 import time
 import traceback
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -38,7 +39,13 @@ from bricklaying.perception.sim_realsense import SIM_INTRINSICS
 from bricklaying.perception.realsense import deproject_pixels_to_points
 from bricklaying.planning.motion_planner import CartesianTrajectory, CartesianWaypoint
 from bricklaying.robot.controller import compute_joint_trajectory
-from bricklaying.robot.joint_config import G1JointConfiguration, G1JointGroup, HAND_OPEN_LEFT, HAND_CLOSED_LEFT
+from bricklaying.robot.joint_config import (
+    G1JointConfiguration,
+    G1JointGroup,
+    HAND_OPEN_LEFT,
+    HAND_OPEN_RIGHT,
+    HAND_CLOSED_LEFT,
+)
 
 FRAME_NPZ = Path("/tmp/codex_latest_camera_frame.npz")
 LOG = Path("/tmp/codex_servo_pick_attempt.jsonl")
@@ -98,6 +105,9 @@ INITIAL_HAND_SETTLE_TIMEOUT = float(os.environ.get("INITIAL_HAND_SETTLE_TIMEOUT"
 ALL_UPPER_KP = os.environ.get("ALL_UPPER_KP")
 ALL_UPPER_KD = os.environ.get("ALL_UPPER_KD")
 RUN_SCALED_INIT = os.environ.get("RUN_SCALED_INIT", "0") == "1"
+RUN_DEMO_INIT = os.environ.get("RUN_DEMO_INIT", "0") == "1"
+DEMO_INIT_DURATION = float(os.environ.get("DEMO_INIT_DURATION", "30.0"))
+INIT_EXECUTOR = os.environ.get("INIT_EXECUTOR", "demo")
 SCALED_INIT_DURATION = float(os.environ.get("SCALED_INIT_DURATION", "30.0"))
 SCALED_INIT_EXEC_SCALE = float(os.environ.get("SCALED_INIT_EXEC_SCALE", "4.0"))
 SCALED_INIT_MAX_QVEL = float(os.environ.get("SCALED_INIT_MAX_QVEL", "8.0"))
@@ -125,6 +135,25 @@ SETTLE_CONSECUTIVE_SAMPLES = int(os.environ.get("SETTLE_CONSECUTIVE_SAMPLES", "4
 NAV_HOLD_HZ = float(os.environ.get("NAV_HOLD_HZ", "100"))
 RIGHT_INIT_POSE = os.environ.get("RIGHT_INIT_POSE")
 POST_NAV_DEMO_INIT = os.environ.get("POST_NAV_DEMO_INIT", "0") == "1"
+EXECUTOR_TEST = os.environ.get("EXECUTOR_TEST", "")
+PREINIT_LEFT_EXECUTOR = os.environ.get("PREINIT_LEFT_EXECUTOR", "servo")
+INIT_KEEP_CURRENT_ROT = os.environ.get("INIT_KEEP_CURRENT_ROT", "1") == "1"
+EXECUTOR_TEST_INIT_DURATION = float(os.environ.get("EXECUTOR_TEST_INIT_DURATION", "12.0"))
+DDS_OBSERVE_MAX_Q_DELTA = float(os.environ.get("DDS_OBSERVE_MAX_Q_DELTA", "0.08"))
+DDS_OBSERVE_MAX_DQ_DELTA = float(os.environ.get("DDS_OBSERVE_MAX_DQ_DELTA", "0.50"))
+DEMO_INIT_MAX_TRACK_Q_ERROR = float(os.environ.get("DEMO_INIT_MAX_TRACK_Q_ERROR", "0.25"))
+DEMO_MAX_TRACK_DQ = float(os.environ.get("DEMO_MAX_TRACK_DQ", "8.0"))
+DEMO_MAX_DQ_PER_STEP = float(os.environ.get("DEMO_MAX_DQ_PER_STEP", "0.1"))
+DEMO_COMMAND_DQ_SCALE = float(os.environ.get("DEMO_COMMAND_DQ_SCALE", "1.0"))
+DEMO_COMMAND_TAU_MODE = os.environ.get("DEMO_COMMAND_TAU_MODE", "rnea")
+HYBRID_MAX_CMD_STEP = float(os.environ.get("HYBRID_MAX_CMD_STEP", "0.001"))
+HYBRID_TRACK_TOL = float(os.environ.get("HYBRID_TRACK_TOL", "0.04"))
+HYBRID_CMD_HZ = float(os.environ.get("HYBRID_CMD_HZ", "100"))
+HYBRID_STALL_TIMEOUT = float(os.environ.get("HYBRID_STALL_TIMEOUT", "6.0"))
+HYBRID_UPPER_DQ_RECOVER = float(os.environ.get("HYBRID_UPPER_DQ_RECOVER", "100.0"))
+HYBRID_MAX_RECOVERIES = int(os.environ.get("HYBRID_MAX_RECOVERIES", "0"))
+HYBRID_SERVO_MODE = os.environ.get("HYBRID_SERVO_MODE", "step")
+HYBRID_STREAM_DQ_HOLD = float(os.environ.get("HYBRID_STREAM_DQ_HOLD", "1.0"))
 
 QVEL_ROBOT_NAMES = [
     "left_hip_pitch_joint",
@@ -172,6 +201,9 @@ QVEL_ROBOT_NAMES = [
     "right_hand_index_1_joint",
 ]
 
+OBS_UPPER_QPOS_IDX = np.array([12, *range(15, 22), *range(29, 36)], dtype=int)
+OBS_UPPER_QVEL_IDX = OBS_UPPER_QPOS_IDX.copy()
+
 
 def _jsonable(v):
     if isinstance(v, np.ndarray):
@@ -191,6 +223,29 @@ def jlog(event, **kw):
     with LOG.open("a") as f:
         f.write(json.dumps(rec) + "\n")
     print("[LOG]", event, {k: rec[k] for k in rec if k not in ("t_wall", "event")}, flush=True)
+
+
+PHASE_TIMINGS = []
+
+
+@contextmanager
+def timed_phase(label, **kw):
+    t0 = time.time()
+    jlog("phase_start", label=label, **kw)
+    try:
+        yield
+    finally:
+        elapsed = time.time() - t0
+        PHASE_TIMINGS.append({"label": label, "elapsed": elapsed, **kw})
+        jlog("phase_done", label=label, elapsed=elapsed, **kw)
+
+
+def log_phase_summary():
+    totals = {}
+    for rec in PHASE_TIMINGS:
+        label = rec["label"]
+        totals[label] = totals.get(label, 0.0) + float(rec["elapsed"])
+    jlog("phase_summary", total_elapsed_by_label=totals, count=len(PHASE_TIMINGS))
 
 
 def apply_pick_gains(dds):
@@ -321,9 +376,68 @@ def configured_right_init_pose():
     return pose
 
 
+def left_init_pose():
+    pose = np.eye(4)
+    pose[:3, 3] = np.array([0.15, 0.4, 0.15], dtype=float)
+    return pose
+
+
+def right_wide_init_pose():
+    pose = np.eye(4)
+    pose[:3, 3] = np.array([0.15, -0.4, 0.15], dtype=float)
+    return pose
+
+
+def with_current_rotation(target, current):
+    pose = target.copy()
+    pose[:3, :3] = current[:3, :3]
+    return pose
+
+
 def upper_max_dq(dds):
     _, dq = dds.get_upper_body_state()
     return float(np.max(np.abs(dq)))
+
+
+def observe_upper_state():
+    _, s = observe()
+    qpos = np.array(s["qpos"], dtype=float)
+    qvel = np.array(s["qvel"], dtype=float)
+    return qpos[OBS_UPPER_QPOS_IDX], qvel[OBS_UPPER_QVEL_IDX]
+
+
+def dds_observe_consistency(dds, label, log_ok=False):
+    q_dds, dq_dds = dds.get_upper_body_state()
+    q_obs, dq_obs = observe_upper_state()
+    q_delta = q_dds - q_obs
+    dq_delta = dq_dds - dq_obs
+    q_idx = int(np.argmax(np.abs(q_delta)))
+    dq_idx = int(np.argmax(np.abs(dq_delta)))
+    max_q_delta = float(abs(q_delta[q_idx]))
+    max_dq_delta = float(abs(dq_delta[dq_idx]))
+    ok = max_q_delta <= DDS_OBSERVE_MAX_Q_DELTA and max_dq_delta <= DDS_OBSERVE_MAX_DQ_DELTA
+    if log_ok or not ok:
+        jlog(
+            "dds_observe_consistency",
+            label=label,
+            ok=ok,
+            max_q_delta=max_q_delta,
+            q_idx=q_idx,
+            q_delta_value=float(q_delta[q_idx]),
+            q_dds=q_dds,
+            q_observe=q_obs,
+            max_dq_delta=max_dq_delta,
+            dq_idx=dq_idx,
+            dq_delta_value=float(dq_delta[dq_idx]),
+            dq_dds=dq_dds,
+            dq_observe=dq_obs,
+        )
+    return ok, {
+        "max_q_delta": max_q_delta,
+        "q_idx": q_idx,
+        "max_dq_delta": max_dq_delta,
+        "dq_idx": dq_idx,
+    }
 
 
 def contact_snapshot():
@@ -331,9 +445,9 @@ def contact_snapshot():
     return d.get("contacts", [])
 
 
-def has_hand_table_contact():
+def hand_table_contacts_from(contacts):
     hits = []
-    for c in contact_snapshot():
+    for c in contacts:
         names = {
             str(c.get("geom1_name")),
             str(c.get("geom2_name")),
@@ -346,12 +460,50 @@ def has_hand_table_contact():
     return hits
 
 
+def has_hand_table_contact():
+    return hand_table_contacts_from(contact_snapshot())
+
+
 def has_right_hand_table_contact():
     return has_hand_table_contact()
 
 
 def allow_table_contact_for_label(label):
     return label.startswith("post_grasp_lift")
+
+
+def log_path_kinematics(demo, label, q0, q_path):
+    if len(q_path) == 0:
+        return
+    left_xyz = []
+    right_xyz = []
+    for q in q_path:
+        left_ee, right_ee = demo.urdf_model.get_frame_transform(
+            q, ["left_ee", "right_ee"], use_reduced=True
+        )
+        left_xyz.append(left_ee[:3, 3])
+        right_xyz.append(right_ee[:3, 3])
+    left_xyz = np.asarray(left_xyz)
+    right_xyz = np.asarray(right_xyz)
+    q_path = np.asarray(q_path)
+    q_delta = q_path - q0
+    jlog(
+        "servo_path_kinematics",
+        label=label,
+        n=len(q_path),
+        waist_range=[float(np.min(q_path[:, 0])), float(np.max(q_path[:, 0]))],
+        max_abs_waist_delta=float(np.max(np.abs(q_delta[:, 0]))),
+        max_abs_left_delta=float(np.max(np.abs(q_delta[:, 1:8]))),
+        max_abs_right_delta=float(np.max(np.abs(q_delta[:, 8:15]))),
+        left_xyz_min=np.min(left_xyz, axis=0),
+        left_xyz_max=np.max(left_xyz, axis=0),
+        left_xyz_start=left_xyz[0],
+        left_xyz_end=left_xyz[-1],
+        right_xyz_min=np.min(right_xyz, axis=0),
+        right_xyz_max=np.max(right_xyz, axis=0),
+        right_xyz_start=right_xyz[0],
+        right_xyz_end=right_xyz[-1],
+    )
 
 
 def brick_states():
@@ -377,14 +529,15 @@ def wait_settled(label, limit=0.05, timeout=20):
         if consecutive >= SETTLE_CONSECUTIVE_SAMPLES:
             jlog("settled", label=label, sim_time=d["time"], max_qvel=mq,
                  qvel_idx=idx, qvel_name=qvel_name(idx), qvel_value=float(qvel[idx]),
-                 samples=consecutive, mocap=s.get("mocap_pos"))
+                 samples=consecutive, elapsed=time.time() - t0, mocap=s.get("mocap_pos"))
             return True
         time.sleep(0.2)
-    jlog("settle_timeout", label=label, last=last)
+    jlog("settle_timeout", label=label, elapsed=time.time() - t0, last=last)
     return False
 
 
 def capture_external_frame(label, timeout=20):
+    t0 = time.time()
     res = subprocess.run(
         [sys.executable, "/tmp/codex_capture_frame.py", str(FRAME_NPZ), str(timeout)],
         cwd=str(ROOT),
@@ -394,14 +547,17 @@ def capture_external_frame(label, timeout=20):
         env=os.environ.copy(),
     )
     jlog("external_camera_capture", label=label, returncode=res.returncode,
-         stdout=res.stdout[-400:], stderr=res.stderr[-400:])
+         elapsed=time.time() - t0, stdout=res.stdout[-400:], stderr=res.stderr[-400:])
     return res.returncode == 0 and FRAME_NPZ.exists()
 
 
 def estimate_best(demo, label):
+    t0 = time.time()
     if not capture_external_frame(label):
+        jlog("estimate_done", label=label, ok=False, stage="capture", elapsed=time.time() - t0)
         return None, False, float("inf")
     jlog("estimate_subprocess_start", label=label, frame=str(FRAME_NPZ))
+    infer_t0 = time.time()
     try:
         res = subprocess.run(
             [sys.executable, "/tmp/codex_estimate_frame.py", str(FRAME_NPZ)],
@@ -413,8 +569,9 @@ def estimate_best(demo, label):
         )
     except subprocess.TimeoutExpired as e:
         jlog("estimate_timeout", label=label, timeout=e.timeout,
-             stdout=(e.stdout or "")[-800:], stderr=(e.stderr or "")[-800:])
+             elapsed=time.time() - t0, stdout=(e.stdout or "")[-800:], stderr=(e.stderr or "")[-800:])
         return None, False, float("inf")
+    infer_elapsed = time.time() - infer_t0
     stdout = res.stdout.strip().splitlines()
     payload = None
     for line in reversed(stdout):
@@ -425,12 +582,13 @@ def estimate_best(demo, label):
             pass
     if res.returncode != 0 or payload is None:
         jlog("estimate_subprocess_failed", label=label, returncode=res.returncode,
+             elapsed=time.time() - t0, infer_elapsed=infer_elapsed,
              stdout=res.stdout[-800:], stderr=res.stderr[-800:])
         return None, False, float("inf")
     best = payload.get("best")
     if best is None:
         jlog("estimate", label=label, n=payload.get("n", 0), candidates=payload.get("candidates", []), best_pos=None,
-             stderr=res.stderr[-400:])
+             elapsed=time.time() - t0, infer_elapsed=infer_elapsed, stderr=res.stderr[-400:])
         return None, False, float("inf")
     class PoseObj:
         pass
@@ -442,7 +600,8 @@ def estimate_best(demo, label):
     pickable = bool(best["pickable"])
     sd = float(best["sd"])
     jlog("estimate", label=label, n=payload.get("n", 0), candidates=payload.get("candidates", []),
-         best_pos=pose.position, best_sd=sd, pickable=pickable, stderr=res.stderr[-400:])
+         best_pos=pose.position, best_sd=sd, pickable=pickable,
+         elapsed=time.time() - t0, infer_elapsed=infer_elapsed, stderr=res.stderr[-400:])
     return pose, pickable, sd
 
 
@@ -457,6 +616,7 @@ def publish_pulse(node, x, theta, duration, hz=20):
 
 
 def pulse_and_check(node, label, x, theta, duration, brick0, dds=None):
+    t0 = time.time()
     info = qvel_info()
     jlog("pulse_start", label=label, x=x, theta=theta, duration=duration, bricks=brick_states(),
          upper_max_dq=None if dds is None else upper_max_dq(dds), **info)
@@ -468,7 +628,8 @@ def pulse_and_check(node, label, x, theta, duration, brick0, dds=None):
     d, s = observe()
     info = qvel_info()
     jlog("pulse_end", label=label, sim_time=d["time"], mocap=s.get("mocap_pos"),
-         brick_disp=disp, bricks=now, upper_max_dq=None if dds is None else upper_max_dq(dds), **info)
+         elapsed=time.time() - t0, brick_disp=disp, bricks=now,
+         upper_max_dq=None if dds is None else upper_max_dq(dds), **info)
     return max(disp), info["qvel"]
 
 
@@ -492,11 +653,17 @@ def confirm_settled_after_nav(label, qv, limit=0.25, dds=None):
     return qv2, ok
 
 
-def servo_joint_path(dds, q_path, label, max_cmd_step=None, cmd_hz=50, track_tol=None, stall_timeout=4.0, urdf_model=None):
+def servo_joint_path(dds, q_path, label, max_cmd_step=None, cmd_hz=50, track_tol=None,
+                     stall_timeout=4.0, urdf_model=None, upper_dq_recover=None,
+                     max_recoveries=None):
     if max_cmd_step is None:
         max_cmd_step = MAX_CMD_STEP
     if track_tol is None:
         track_tol = TRACK_TOL
+    if upper_dq_recover is None:
+        upper_dq_recover = UPPER_DQ_RECOVER
+    if max_recoveries is None:
+        max_recoveries = SERVO_MAX_RECOVERIES
     q_cmd, _ = dds.get_upper_body_state()
     q_cmd = q_cmd.copy()
     last_log = 0.0
@@ -504,7 +671,7 @@ def servo_joint_path(dds, q_path, label, max_cmd_step=None, cmd_hz=50, track_tol
     max_seen_qvel = 0.0
     max_seen_err = 0.0
     recoveries = 0
-    def hold_current(reason, wi, upper_dq_value, qvel, duration=1.0):
+    def hold_current(reason, wi, upper_dq_value, qvel, duration=3.0):
         nonlocal q_cmd, wait_started, recoveries
         q_hold, _ = dds.get_upper_body_state()
         q_hold = q_hold.copy()
@@ -518,14 +685,26 @@ def servo_joint_path(dds, q_path, label, max_cmd_step=None, cmd_hz=50, track_tol
             )
         jlog("servo_velocity_recovery_start", label=label, reason=reason, wi=wi,
              recovery=recoveries + 1, qvel=qvel, upper_max_dq=upper_dq_value, q_hold=q_hold)
-        for _ in range(int(duration * cmd_hz)):
+        min_ticks = max(1, int(0.5 * cmd_hz))
+        max_ticks = max(min_ticks, int(duration * cmd_hz))
+        final_upper = upper_dq_value
+        for tick in range(max_ticks):
             dds.set_upper_body_target(q_hold, np.zeros_like(q_hold), tau_cmd)
             time.sleep(1.0 / cmd_hz)
+            _, dq_hold = dds.get_upper_body_state()
+            final_upper = float(np.max(np.abs(dq_hold)))
+            if final_upper > UPPER_DQ_ABORT:
+                jlog("servo_velocity_recovery_abort", label=label, wi=wi,
+                     recovery=recoveries + 1, upper_max_dq=final_upper, tick=tick, qvel=maxqvel())
+                return False
+            if tick >= min_ticks and final_upper < 0.20:
+                break
         q_cmd = q_hold
         wait_started = None
         recoveries += 1
         jlog("servo_velocity_recovery_done", label=label, wi=wi,
              recovery=recoveries, qvel=maxqvel(), upper_max_dq=upper_max_dq(dds))
+        return True
 
     for wi, q_goal in enumerate(q_path):
         while True:
@@ -534,6 +713,15 @@ def servo_joint_path(dds, q_path, label, max_cmd_step=None, cmd_hz=50, track_tol
             err_idx = int(np.argmax(np.abs(qerr)))
             cmd_err = float(np.max(np.abs(qerr)))
             if cmd_err > track_tol:
+                _, dq_tick = dds.get_upper_body_state()
+                upper_dq_tick = float(np.max(np.abs(dq_tick)))
+                if upper_dq_tick > UPPER_DQ_ABORT:
+                    jlog("servo_abort_upper_dq", label=label, wi=wi, upper_max_dq=upper_dq_tick, **qvel_info())
+                    return False, {"status": "unsafe", "max_qvel": max_seen_qvel, "max_cmd_err": max_seen_err}
+                if upper_dq_tick > upper_dq_recover and recoveries < max_recoveries:
+                    if not hold_current("wait_upper_dq_tick", wi, upper_dq_tick, maxqvel()):
+                        return False, {"status": "unsafe", "max_qvel": max_seen_qvel, "max_cmd_err": max_seen_err}
+                    continue
                 if urdf_model is None:
                     tau_cmd = np.zeros_like(q_cmd)
                 else:
@@ -549,7 +737,7 @@ def servo_joint_path(dds, q_path, label, max_cmd_step=None, cmd_hz=50, track_tol
                 if now - last_log > 1.0:
                     qvel = maxqvel()
                     _, dq_meas = dds.get_upper_body_state()
-                    upper_max_dq = float(np.max(np.abs(dq_meas)))
+                    upper_dq_value = float(np.max(np.abs(dq_meas)))
                     table_hits = has_right_hand_table_contact()
                     max_seen_qvel = max(max_seen_qvel, qvel)
                     max_seen_err = max(max_seen_err, cmd_err)
@@ -559,7 +747,7 @@ def servo_joint_path(dds, q_path, label, max_cmd_step=None, cmd_hz=50, track_tol
                         wi=wi,
                         n=len(q_path),
                         qvel=qvel,
-                        upper_max_dq=upper_max_dq,
+                        upper_max_dq=upper_dq_value,
                         cmd_track=cmd_err,
                         err_idx=err_idx,
                         err_value=float(qerr[err_idx]),
@@ -575,14 +763,15 @@ def servo_joint_path(dds, q_path, label, max_cmd_step=None, cmd_hz=50, track_tol
                         else:
                             jlog("servo_abort_table_contact", label=label, wi=wi, hits=table_hits)
                             return False, {"status": "table_contact", "max_qvel": max_seen_qvel, "max_cmd_err": max_seen_err}
-                    if upper_max_dq > UPPER_DQ_ABORT:
-                        jlog("servo_abort_upper_dq", label=label, wi=wi, upper_max_dq=upper_max_dq, **qvel_info())
+                    if upper_dq_value > UPPER_DQ_ABORT:
+                        jlog("servo_abort_upper_dq", label=label, wi=wi, upper_max_dq=upper_dq_value, **qvel_info())
                         return False, {"status": "unsafe", "max_qvel": max_seen_qvel, "max_cmd_err": max_seen_err}
-                    if upper_max_dq > UPPER_DQ_RECOVER and recoveries < SERVO_MAX_RECOVERIES:
-                        hold_current("wait_upper_dq", wi, upper_max_dq, qvel)
+                    if upper_dq_value > upper_dq_recover and recoveries < max_recoveries:
+                        if not hold_current("wait_upper_dq", wi, upper_dq_value, qvel):
+                            return False, {"status": "unsafe", "max_qvel": max_seen_qvel, "max_cmd_err": max_seen_err}
                         continue
-                    if now - wait_started > stall_timeout and upper_max_dq < 0.02 and qvel < 0.5:
-                        jlog("servo_stalled", label=label, wi=wi, qvel=qvel, upper_max_dq=upper_max_dq, cmd_track=cmd_err)
+                    if now - wait_started > stall_timeout and upper_dq_value < 0.02 and qvel < 0.5:
+                        jlog("servo_stalled", label=label, wi=wi, qvel=qvel, upper_max_dq=upper_dq_value, cmd_track=cmd_err)
                         return False, {"status": "stalled", "wi": wi, "max_qvel": max_seen_qvel, "max_cmd_err": max_seen_err}
                     last_log = now
                 time.sleep(1.0 / cmd_hz)
@@ -600,6 +789,7 @@ def servo_joint_path(dds, q_path, label, max_cmd_step=None, cmd_hz=50, track_tol
                         q_cmd,
                     )
                 dds.set_upper_body_target(q_cmd, np.zeros_like(q_cmd), tau_cmd)
+                time.sleep(1.0 / cmd_hz)
                 break
             q_cmd = q_cmd + np.clip(diff, -max_cmd_step, max_cmd_step)
             if urdf_model is None:
@@ -611,6 +801,14 @@ def servo_joint_path(dds, q_path, label, max_cmd_step=None, cmd_hz=50, track_tol
                     q_cmd,
                 )
             dds.set_upper_body_target(q_cmd, np.zeros_like(q_cmd), tau_cmd)
+            _, dq_tick = dds.get_upper_body_state()
+            upper_dq_tick = float(np.max(np.abs(dq_tick)))
+            if upper_dq_tick > UPPER_DQ_ABORT:
+                jlog("servo_abort_upper_dq", label=label, wi=wi, upper_max_dq=upper_dq_tick, **qvel_info())
+                return False, {"status": "unsafe", "max_qvel": max_seen_qvel, "max_cmd_err": max_seen_err}
+            if upper_dq_tick > upper_dq_recover and recoveries < max_recoveries:
+                if not hold_current("progress_upper_dq_tick", wi, upper_dq_tick, maxqvel()):
+                    return False, {"status": "unsafe", "max_qvel": max_seen_qvel, "max_cmd_err": max_seen_err}
             now = time.time()
             if now - last_log > 1.0:
                 qvel = maxqvel()
@@ -618,35 +816,49 @@ def servo_joint_path(dds, q_path, label, max_cmd_step=None, cmd_hz=50, track_tol
                 qerr_vec = q_cmd - q_meas2
                 err_idx = int(np.argmax(np.abs(qerr_vec)))
                 qerr = float(np.max(np.abs(qerr_vec)))
-                upper_max_dq = float(np.max(np.abs(dq_meas)))
+                upper_dq_value = float(np.max(np.abs(dq_meas)))
                 max_seen_qvel = max(max_seen_qvel, qvel)
                 max_seen_err = max(max_seen_err, qerr)
+                contacts = contact_snapshot()
+                table_hits = hand_table_contacts_from(contacts)
                 extra = {}
-                if qerr > 0.14 or upper_max_dq > 1.0:
-                    table_hits = has_right_hand_table_contact()
+                if table_hits:
+                    jlog(
+                        "servo_hand_table_contact_seen",
+                        label=label,
+                        wi=wi,
+                        qvel=qvel,
+                        upper_max_dq=upper_dq_value,
+                        cmd_track=qerr,
+                        hits=table_hits,
+                    )
+                    if allow_table_contact_for_label(label):
+                        jlog("servo_allow_table_contact", label=label, wi=wi, hits=table_hits)
+                    else:
+                        jlog("servo_abort_table_contact", label=label, wi=wi, hits=table_hits)
+                        return False, {"status": "table_contact", "max_qvel": max_seen_qvel, "max_cmd_err": max_seen_err}
+                if qerr > 0.14 or upper_dq_value > 1.0:
                     extra = {
                         "err_idx": err_idx,
                         "err_value": float(qerr_vec[err_idx]),
                         "q_cmd": q_cmd,
                         "q_meas": q_meas2,
-                        "contacts": contact_snapshot(),
+                        "contacts": contacts,
                         "table_hits": table_hits,
                     }
-                    if table_hits:
-                        if allow_table_contact_for_label(label):
-                            jlog("servo_allow_table_contact", label=label, wi=wi, hits=table_hits)
-                        else:
-                            jlog("servo_abort_table_contact", label=label, wi=wi, hits=table_hits)
-                            return False, {"status": "table_contact", "max_qvel": max_seen_qvel, "max_cmd_err": max_seen_err}
-                jlog("servo_progress", label=label, wi=wi, n=len(q_path), qvel=qvel, upper_max_dq=upper_max_dq, cmd_track=qerr, dqnorm=float(np.linalg.norm(dq_meas)), **extra)
-                if upper_max_dq > UPPER_DQ_ABORT:
-                    jlog("servo_abort_upper_dq", label=label, wi=wi, upper_max_dq=upper_max_dq, **qvel_info())
+                jlog("servo_progress", label=label, wi=wi, n=len(q_path), qvel=qvel, upper_max_dq=upper_dq_value, cmd_track=qerr, dqnorm=float(np.linalg.norm(dq_meas)), **extra)
+                if upper_dq_value > UPPER_DQ_ABORT:
+                    jlog("servo_abort_upper_dq", label=label, wi=wi, upper_max_dq=upper_dq_value, **qvel_info())
                     return False, {"status": "unsafe", "max_qvel": max_seen_qvel, "max_cmd_err": max_seen_err}
-                if upper_max_dq > UPPER_DQ_RECOVER and recoveries < SERVO_MAX_RECOVERIES:
-                    hold_current("progress_upper_dq", wi, upper_max_dq, qvel)
+                if upper_dq_value > upper_dq_recover and recoveries < max_recoveries:
+                    if not hold_current("progress_upper_dq", wi, upper_dq_value, qvel):
+                        return False, {"status": "unsafe", "max_qvel": max_seen_qvel, "max_cmd_err": max_seen_err}
                 last_log = now
             time.sleep(1.0 / cmd_hz)
-    for _ in range(100):
+    final_start = time.time()
+    final_err = float("inf")
+    qvel = float("inf")
+    while time.time() - final_start < max(3.0, stall_timeout):
         if urdf_model is None:
             tau_cmd = np.zeros_like(q_cmd)
         else:
@@ -657,12 +869,141 @@ def servo_joint_path(dds, q_path, label, max_cmd_step=None, cmd_hz=50, track_tol
             )
         dds.set_upper_body_target(q_cmd, np.zeros_like(q_cmd), tau_cmd)
         time.sleep(1.0 / cmd_hz)
+        qvel = maxqvel()
+        q_meas, _ = dds.get_upper_body_state()
+        final_err = float(np.max(np.abs(q_cmd - q_meas)))
+        if qvel < 1.0 and final_err < track_tol:
+            break
     qvel = maxqvel()
     q_meas, _ = dds.get_upper_body_state()
     final_err = float(np.max(np.abs(q_cmd - q_meas)))
     jlog("servo_done", label=label, qvel=qvel, final_cmd_err=final_err, max_qvel=max(max_seen_qvel, qvel), max_cmd_err=max(max_seen_err, final_err))
     ok = qvel < 1.0 and final_err < track_tol
     return ok, {"status": "done" if ok else "final_lag", "max_qvel": max(max_seen_qvel, qvel), "max_cmd_err": max(max_seen_err, final_err)}
+
+
+def servo_joint_path_streamed(dds, q_path, label, max_cmd_step=None, cmd_hz=100, track_tol=None,
+                              urdf_model=None, upper_dq_hold=1.0):
+    """Stream a dense joint path at a fixed command rate without sleeping per waypoint."""
+    if max_cmd_step is None:
+        max_cmd_step = MAX_CMD_STEP
+    if track_tol is None:
+        track_tol = TRACK_TOL
+
+    q_path = np.asarray(q_path, dtype=float)
+    q_cmd, _ = dds.get_upper_body_state()
+    q_cmd = q_cmd.copy()
+    q_path[0] = q_cmd.copy()
+    wi = 0
+    last_log = 0.0
+    last_progress = time.time()
+    max_seen_qvel = 0.0
+    max_seen_err = 0.0
+    max_seen_upper = 0.0
+    tick = 0
+
+    def tau_for(q):
+        if urdf_model is None:
+            return np.zeros_like(q)
+        return pin.computeGeneralizedGravity(
+            urdf_model.reduced_robot.model,
+            urdf_model.reduced_robot.data,
+            q,
+        )
+
+    def advance_one_tick(q_current, idx):
+        budget = max_cmd_step
+        advanced = False
+        while idx < len(q_path) - 1 and budget > 1e-12:
+            target = q_path[idx + 1]
+            diff = target - q_current
+            dist = float(np.max(np.abs(diff)))
+            if dist <= budget:
+                q_current = target.copy()
+                idx += 1
+                budget -= dist
+                advanced = True
+                continue
+            q_current = q_current + np.clip(diff, -budget, budget)
+            budget = 0.0
+            advanced = True
+        return q_current, idx, advanced
+
+    while wi < len(q_path) - 1:
+        q_meas, dq_meas = dds.get_upper_body_state()
+        qerr_vec = q_cmd - q_meas
+        qerr = float(np.max(np.abs(qerr_vec)))
+        err_idx = int(np.argmax(np.abs(qerr_vec)))
+        upper_dq_value = float(np.max(np.abs(dq_meas)))
+        max_seen_err = max(max_seen_err, qerr)
+        max_seen_upper = max(max_seen_upper, upper_dq_value)
+
+        velocity_hold = upper_dq_value > upper_dq_hold
+        if velocity_hold:
+            q_cmd = q_meas.copy()
+            qerr_vec = q_cmd - q_meas
+            qerr = 0.0
+            err_idx = 0
+        should_hold = qerr > track_tol or velocity_hold
+        if not should_hold:
+            old_wi = wi
+            q_cmd, wi, advanced = advance_one_tick(q_cmd, wi)
+            if advanced and wi != old_wi:
+                last_progress = time.time()
+
+        dds.set_upper_body_target(q_cmd, np.zeros_like(q_cmd), tau_for(q_cmd))
+
+        now = time.time()
+        if now - last_log > 1.0:
+            qvel = maxqvel()
+            max_seen_qvel = max(max_seen_qvel, qvel)
+            contacts = contact_snapshot()
+            table_hits = hand_table_contacts_from(contacts)
+            event = "servo_stream_hold" if should_hold else "servo_stream_progress"
+            extra = {}
+            if qerr > 0.14 or upper_dq_value > 1.0 or table_hits:
+                extra = {
+                    "err_idx": err_idx,
+                    "err_value": float(qerr_vec[err_idx]),
+                    "q_cmd": q_cmd,
+                    "q_meas": q_meas,
+                    "contacts": contacts,
+                    "table_hits": table_hits,
+                }
+            jlog(event, label=label, wi=wi, n=len(q_path), qvel=qvel,
+                 upper_max_dq=upper_dq_value, cmd_track=qerr,
+                 dqnorm=float(np.linalg.norm(dq_meas)), tick=tick, **extra)
+            if table_hits:
+                if allow_table_contact_for_label(label):
+                    jlog("servo_allow_table_contact", label=label, wi=wi, hits=table_hits)
+                else:
+                    jlog("servo_abort_table_contact", label=label, wi=wi, hits=table_hits)
+                    return False, {"status": "table_contact", "max_qvel": max_seen_qvel, "max_cmd_err": max_seen_err}
+            if upper_dq_value > UPPER_DQ_ABORT:
+                jlog("servo_abort_upper_dq", label=label, wi=wi, upper_max_dq=upper_dq_value, **qvel_info())
+                return False, {"status": "unsafe", "max_qvel": max_seen_qvel, "max_cmd_err": max_seen_err}
+            if now - last_progress > max(30.0, 5.0 * HYBRID_STALL_TIMEOUT):
+                jlog("servo_stream_stalled", label=label, wi=wi, qvel=qvel,
+                     upper_max_dq=upper_dq_value, cmd_track=qerr, since_progress=now - last_progress)
+                return False, {"status": "stalled", "wi": wi, "max_qvel": max_seen_qvel, "max_cmd_err": max_seen_err}
+            last_log = now
+
+        tick += 1
+        time.sleep(1.0 / cmd_hz)
+
+    for _ in range(100):
+        dds.set_upper_body_target(q_cmd, np.zeros_like(q_cmd), tau_for(q_cmd))
+        time.sleep(1.0 / cmd_hz)
+    qvel = maxqvel()
+    q_meas, _ = dds.get_upper_body_state()
+    final_err = float(np.max(np.abs(q_cmd - q_meas)))
+    max_seen_qvel = max(max_seen_qvel, qvel)
+    max_seen_err = max(max_seen_err, final_err)
+    jlog("servo_stream_done", label=label, qvel=qvel, final_cmd_err=final_err,
+         max_qvel=max_seen_qvel, max_upper_dq=max_seen_upper, max_cmd_err=max_seen_err, ticks=tick)
+    ok = qvel < 1.0 and final_err < track_tol
+    return ok, {"status": "done" if ok else "final_lag", "max_qvel": max_seen_qvel,
+                "max_upper_dq": max_seen_upper, "max_cmd_err": max_seen_err, "ticks": tick}
 
 
 def preinit_recovery(demo):
@@ -704,21 +1045,13 @@ def preinit_recovery(demo):
 
 
 def preinit_left_park(demo):
-    if len(PREINIT_LEFT_PARK_Q) != 7:
-        jlog("preinit_left_park_bad_config", q=PREINIT_LEFT_PARK_Q)
-        return False
     q0, _ = demo.dds.get_upper_body_state()
-    q_target = q0.copy()
-    q_target[1:8] = PREINIT_LEFT_PARK_Q
-    max_delta = float(np.max(np.abs(q_target - q0)))
-    n = max(1, int(np.ceil(max_delta / PREINIT_MAX_CMD_STEP)))
-    q_path = np.linspace(q0, q_target, n + 1)
     jlog(
         "preinit_left_park_start",
         q0=q0,
-        q_target=q_target,
-        n=len(q_path),
-        max_delta=max_delta,
+        target=left_init_pose(),
+        mode="left_cartesian_init",
+        executor=PREINIT_LEFT_EXECUTOR,
         contacts=contact_snapshot(),
         qvel=maxqvel(),
     )
@@ -728,16 +1061,41 @@ def preinit_left_park(demo):
     for _ in range(100):
         demo.dds.set_hand_target(HAND_OPEN_LEFT, right_hand)
         time.sleep(0.01)
-    ok, info = servo_joint_path(
-        demo.dds,
-        q_path,
-        "preinit_left_park",
-        max_cmd_step=PREINIT_MAX_CMD_STEP,
-        cmd_hz=100,
-        track_tol=PREINIT_TRACK_TOL,
-        stall_timeout=6.0,
-        urdf_model=demo.urdf_model,
-    )
+    if PREINIT_LEFT_EXECUTOR == "demo":
+        ok, info = execute_demo_controller(
+            demo,
+            lambda: plan_left_init(demo, duration=EXECUTOR_TEST_INIT_DURATION),
+            demo.ik_solver.left_q_idx,
+            "preinit_left_park",
+        )
+    elif PREINIT_LEFT_EXECUTOR == "hybrid":
+        ok, info = execute_hybrid_replanned(
+            demo,
+            lambda: plan_left_init(demo, duration=EXECUTOR_TEST_INIT_DURATION),
+            demo.ik_solver.left_q_idx,
+            "preinit_left_park",
+        )
+    elif PREINIT_LEFT_EXECUTOR == "scaled":
+        ok, info = execute_scaled_replanned(
+            demo,
+            lambda: plan_left_init(demo, duration=EXECUTOR_TEST_INIT_DURATION),
+            demo.ik_solver.left_q_idx,
+            "preinit_left_park",
+            dt=0.20,
+        )
+    elif PREINIT_LEFT_EXECUTOR == "servo":
+        ok, info = servo_execute_replanned(
+            demo,
+            lambda: plan_left_init(demo, duration=EXECUTOR_TEST_INIT_DURATION),
+            demo.ik_solver.left_q_idx,
+            "preinit_left_park",
+            attempts=1,
+            dt=0.20,
+            track_tol=PREINIT_TRACK_TOL,
+            max_cmd_step=PREINIT_MAX_CMD_STEP,
+        )
+    else:
+        raise ValueError(f"unknown PREINIT_LEFT_EXECUTOR={PREINIT_LEFT_EXECUTOR!r}")
     qf, _ = demo.dds.get_upper_body_state()
     jlog(
         "preinit_left_park_done",
@@ -866,6 +1224,321 @@ def scaled_init(demo):
     return execute_joint_traj_scaled(demo, jt, "scaled_init", SCALED_INIT_EXEC_SCALE)
 
 
+class MotionMonitor:
+    def __init__(self, label, dds, hz=10.0, log_period=1.0):
+        self.label = label
+        self.dds = dds
+        self.hz = hz
+        self.log_period = log_period
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self.max_qvel = 0.0
+        self.max_upper_dq = 0.0
+        self.hand_table_hits = []
+        self.samples = 0
+        self._last_log = 0.0
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                qvinfo = qvel_info()
+                contacts = contact_snapshot()
+                hits = hand_table_contacts_from(contacts)
+                self.samples += 1
+                self.max_qvel = max(self.max_qvel, qvinfo["qvel"])
+                upper_dq = upper_max_dq(self.dds)
+                self.max_upper_dq = max(self.max_upper_dq, upper_dq)
+                if hits:
+                    self.hand_table_hits = hits
+                now = time.time()
+                if hits or qvinfo["qvel"] > 1.0 or now - self._last_log >= self.log_period:
+                    jlog("motion_monitor", label=self.label, hits=hits, contacts=contacts[:8],
+                         samples=self.samples, upper_max_dq=upper_dq, **qvinfo)
+                    self._last_log = now
+            except Exception as exc:
+                jlog("motion_monitor_error", label=self.label, error=repr(exc))
+            time.sleep(1.0 / self.hz)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+        jlog(
+            "motion_monitor_done",
+            label=self.label,
+            samples=self.samples,
+            max_qvel=self.max_qvel,
+            max_upper_dq=self.max_upper_dq,
+            hand_table_hits=self.hand_table_hits,
+        )
+
+
+def execute_scaled_replanned(demo, plan_fn, free_joints, label, dt=0.20):
+    execute_t0 = time.time()
+    q0, _ = demo.dds.get_upper_body_state()
+    set_gravity_hold(demo, q0, f"{label}_scaled_before_external_hold")
+    precompute_t0 = time.time()
+    with ExternalHoldPublisher(q0, hz=EXTERNAL_HOLD_HZ):
+        traj = plan_fn()
+        jt = compute_joint_trajectory(
+            demo.ik_solver,
+            demo.urdf_model,
+            traj,
+            q0,
+            dt=dt,
+            max_dq_per_step=IK_MAX_DQ_PER_STEP,
+            max_ik_pos_error=0.08,
+            max_ik_rot_error=1.2,
+            free_joints=free_joints,
+        )
+    precompute_elapsed = time.time() - precompute_t0
+    set_gravity_hold(demo, q0, f"{label}_scaled_after_external_hold")
+    jt.q[0] = q0.copy()
+    log_path_kinematics(demo, label + "_scaled", q0, jt.q)
+    with MotionMonitor(label + "_scaled", demo.dds):
+        ok, info = execute_joint_traj_scaled(demo, jt, label, SCALED_JOINT_EXEC_SCALE)
+    info = {"executor": "scaled", "precompute_elapsed": precompute_elapsed, **info}
+    jlog("scaled_replanned_done", label=label, ok=ok, total_elapsed=time.time() - execute_t0, info=info)
+    return ok, info
+
+
+def execute_demo_controller(demo, plan_fn, free_joints, label):
+    execute_t0 = time.time()
+    q0, _ = demo.dds.get_upper_body_state()
+    set_gravity_hold(demo, q0, f"{label}_demo_before_plan")
+    consistency_ok, consistency_info = dds_observe_consistency(demo.dds, f"{label}_demo_before_plan", log_ok=True)
+    if not consistency_ok:
+        jlog("demo_controller_abort_state_mismatch", label=label, info=consistency_info)
+        return False, {"executor": "demo", "status": "state_mismatch", **consistency_info}
+    traj = plan_fn()
+    plan_elapsed = time.time() - execute_t0
+    jlog(
+        "demo_controller_execute_start",
+        label=label,
+        duration=traj.duration,
+        n=traj.n_waypoints,
+        free_joints=free_joints,
+        q0=q0,
+        contacts=contact_snapshot(),
+        qvel=maxqvel(),
+    )
+    old_max_track_q_error = demo.controller.max_track_q_error
+    old_max_track_dq = demo.controller.max_track_dq
+    old_max_dq_per_step = demo.controller.max_dq_per_step
+    old_command_dq_scale = demo.controller.command_dq_scale
+    old_command_tau_mode = demo.controller.command_tau_mode
+    demo.controller.max_track_dq = DEMO_MAX_TRACK_DQ
+    demo.controller.max_dq_per_step = DEMO_MAX_DQ_PER_STEP
+    demo.controller.command_dq_scale = DEMO_COMMAND_DQ_SCALE
+    demo.controller.command_tau_mode = DEMO_COMMAND_TAU_MODE
+    if "init" in label or "park" in label:
+        demo.controller.max_track_q_error = DEMO_INIT_MAX_TRACK_Q_ERROR
+        jlog(
+            "demo_controller_thresholds",
+            label=label,
+            max_track_q_error=demo.controller.max_track_q_error,
+            old_max_track_q_error=old_max_track_q_error,
+            max_track_dq=demo.controller.max_track_dq,
+            old_max_track_dq=old_max_track_dq,
+            max_dq_per_step=demo.controller.max_dq_per_step,
+            old_max_dq_per_step=old_max_dq_per_step,
+            command_dq_scale=demo.controller.command_dq_scale,
+            old_command_dq_scale=old_command_dq_scale,
+            command_tau_mode=demo.controller.command_tau_mode,
+            old_command_tau_mode=old_command_tau_mode,
+        )
+    try:
+        with ExternalHoldPublisher(q0, hz=EXTERNAL_HOLD_HZ):
+            jt = demo.controller.prepare_trajectory(traj, free_joints=free_joints)
+        if jt is None:
+            ok = False
+        else:
+            with MotionMonitor(label + "_demo", demo.dds):
+                ok = demo.controller.execute_precomputed(
+                    jt,
+                    source_waypoints=traj.n_waypoints,
+                    source_duration=traj.duration,
+                )
+    finally:
+        demo.controller.max_track_q_error = old_max_track_q_error
+        demo.controller.max_track_dq = old_max_track_dq
+        demo.controller.max_dq_per_step = old_max_dq_per_step
+        demo.controller.command_dq_scale = old_command_dq_scale
+        demo.controller.command_tau_mode = old_command_tau_mode
+    stats = demo.controller.get_stats()
+    post_consistency_ok, post_consistency_info = dds_observe_consistency(
+        demo.dds, f"{label}_demo_after_execute", log_ok=True
+    )
+    info = {
+        "executor": "demo",
+        "status": "done" if ok else "failed",
+        "failure_reason": getattr(demo.controller, "last_error_reason", None),
+        "failure_info": getattr(demo.controller, "last_error_info", {}),
+        "plan_elapsed": plan_elapsed,
+        "precompute_elapsed": getattr(demo.controller, "last_precompute_elapsed", None),
+        "precompute_info": getattr(demo.controller, "last_precompute_info", {}),
+        "controller_execute_elapsed": getattr(demo.controller, "last_execute_elapsed", None),
+        "max_qvel": maxqvel(),
+        "post_consistency_ok": post_consistency_ok,
+        "post_consistency": post_consistency_info,
+        "stats": None if stats is None else {
+            "duration": stats.duration,
+            "mean_ik_pos_error": stats.mean_ik_pos_error,
+            "max_ik_pos_error": stats.max_ik_pos_error,
+            "mean_ik_rot_error": stats.mean_ik_rot_error,
+            "max_ik_rot_error": stats.max_ik_rot_error,
+            "mean_track_q_error": stats.mean_track_q_error,
+            "max_track_q_error": stats.max_track_q_error,
+            "mean_track_pos_error": stats.mean_track_pos_error,
+            "max_track_pos_error": stats.max_track_pos_error,
+            "mean_track_rot_error": stats.mean_track_rot_error,
+            "max_track_rot_error": stats.max_track_rot_error,
+            "max_left_track_pos_error": max(stats.left_track_pos_errors),
+            "max_right_track_pos_error": max(stats.right_track_pos_errors),
+            "max_left_track_rot_error": max(stats.left_track_rot_errors),
+            "max_right_track_rot_error": max(stats.right_track_rot_errors),
+            "mean_loop_time": stats.mean_loop_time,
+            "max_loop_time": stats.max_loop_time,
+        },
+    }
+    jlog(
+        "demo_controller_execute_done",
+        label=label,
+        ok=ok,
+        total_elapsed=time.time() - execute_t0,
+        info=info,
+        qvel=maxqvel(),
+        contacts=contact_snapshot(),
+    )
+    return ok, info
+
+
+def execute_hybrid_replanned(demo, plan_fn, free_joints, label):
+    """Use demo IK planning, then execute the joint path with qvel-gated servo playback."""
+    execute_t0 = time.time()
+    q0, _ = demo.dds.get_upper_body_state()
+    set_gravity_hold(demo, q0, f"{label}_hybrid_before_plan")
+    consistency_ok, consistency_info = dds_observe_consistency(demo.dds, f"{label}_hybrid_before_plan", log_ok=True)
+    if not consistency_ok:
+        jlog("hybrid_abort_state_mismatch", label=label, info=consistency_info)
+        return False, {"executor": "hybrid", "status": "state_mismatch", **consistency_info}
+
+    plan_t0 = time.time()
+    traj = plan_fn()
+    plan_elapsed = time.time() - plan_t0
+    old_max_dq_per_step = demo.controller.max_dq_per_step
+    demo.controller.max_dq_per_step = DEMO_MAX_DQ_PER_STEP
+    try:
+        precompute_t0 = time.time()
+        with ExternalHoldPublisher(q0, hz=EXTERNAL_HOLD_HZ):
+            jt = demo.controller.prepare_trajectory(traj, free_joints=free_joints)
+        precompute_elapsed = time.time() - precompute_t0
+    finally:
+        demo.controller.max_dq_per_step = old_max_dq_per_step
+
+    if jt is None:
+        info = {
+            "executor": "hybrid",
+            "status": "precompute_failed",
+            "failure_reason": getattr(demo.controller, "last_error_reason", None),
+            "failure_info": getattr(demo.controller, "last_error_info", {}),
+            "plan_elapsed": plan_elapsed,
+            "precompute_elapsed": getattr(demo.controller, "last_precompute_elapsed", None),
+            "precompute_info": getattr(demo.controller, "last_precompute_info", {}),
+        }
+        jlog("hybrid_execute_done", label=label, ok=False, total_elapsed=time.time() - execute_t0, info=info)
+        return False, info
+
+    set_gravity_hold(demo, q0, f"{label}_hybrid_after_plan_hold")
+    if not wait_settled(f"{label}_hybrid_after_plan_hold", limit=0.25, timeout=8):
+        info = {
+            "executor": "hybrid",
+            "status": "preexecute_not_settled",
+            "plan_elapsed": plan_elapsed,
+            "precompute_elapsed": precompute_elapsed,
+            "precompute_info": getattr(demo.controller, "last_precompute_info", {}),
+            "qvel": maxqvel(),
+            "upper_max_dq": upper_max_dq(demo.dds),
+        }
+        jlog("hybrid_execute_done", label=label, ok=False, total_elapsed=time.time() - execute_t0, info=info)
+        return False, info
+
+    jt.q[0] = q0.copy()
+    log_path_kinematics(demo, label + "_hybrid", q0, jt.q)
+    jlog(
+        "hybrid_execute_start",
+        label=label,
+        n=jt.n_waypoints,
+        duration=jt.duration,
+        free_joints=free_joints,
+        max_cmd_step=HYBRID_MAX_CMD_STEP,
+        track_tol=HYBRID_TRACK_TOL,
+        cmd_hz=HYBRID_CMD_HZ,
+        stall_timeout=HYBRID_STALL_TIMEOUT,
+        upper_dq_recover=HYBRID_UPPER_DQ_RECOVER,
+        max_recoveries=HYBRID_MAX_RECOVERIES,
+        servo_mode=HYBRID_SERVO_MODE,
+        stream_dq_hold=HYBRID_STREAM_DQ_HOLD,
+        precompute_info=getattr(demo.controller, "last_precompute_info", {}),
+        qvel=maxqvel(),
+        contacts=contact_snapshot(),
+    )
+    with MotionMonitor(label + "_hybrid", demo.dds):
+        if HYBRID_SERVO_MODE == "stream":
+            ok, servo_info = servo_joint_path_streamed(
+                demo.dds,
+                jt.q,
+                label + "_hybrid",
+                max_cmd_step=HYBRID_MAX_CMD_STEP,
+                cmd_hz=HYBRID_CMD_HZ,
+                track_tol=HYBRID_TRACK_TOL,
+                upper_dq_hold=HYBRID_STREAM_DQ_HOLD,
+                urdf_model=demo.urdf_model,
+            )
+        elif HYBRID_SERVO_MODE == "step":
+            ok, servo_info = servo_joint_path(
+                demo.dds,
+                jt.q,
+                label + "_hybrid",
+                max_cmd_step=HYBRID_MAX_CMD_STEP,
+                cmd_hz=HYBRID_CMD_HZ,
+                track_tol=HYBRID_TRACK_TOL,
+                stall_timeout=HYBRID_STALL_TIMEOUT,
+                upper_dq_recover=HYBRID_UPPER_DQ_RECOVER,
+                max_recoveries=HYBRID_MAX_RECOVERIES,
+                urdf_model=demo.urdf_model,
+            )
+        else:
+            raise ValueError(f"unknown HYBRID_SERVO_MODE={HYBRID_SERVO_MODE!r}")
+    post_consistency_ok, post_consistency_info = dds_observe_consistency(
+        demo.dds, f"{label}_hybrid_after_execute", log_ok=True
+    )
+    info = {
+        "executor": "hybrid",
+        "status": "done" if ok else servo_info.get("status", "failed"),
+        "plan_elapsed": plan_elapsed,
+        "precompute_elapsed": precompute_elapsed,
+        "precompute_info": getattr(demo.controller, "last_precompute_info", {}),
+        "servo_info": servo_info,
+        "post_consistency_ok": post_consistency_ok,
+        "post_consistency": post_consistency_info,
+    }
+    jlog(
+        "hybrid_execute_done",
+        label=label,
+        ok=ok,
+        total_elapsed=time.time() - execute_t0,
+        info=info,
+        qvel=maxqvel(),
+        upper_max_dq=upper_max_dq(demo.dds),
+        contacts=contact_snapshot(),
+    )
+    return ok, info
+
+
 class HoldPublisher:
     def __init__(self, dds, q, urdf_model=None, hz=50):
         self.dds = dds
@@ -944,12 +1617,14 @@ class ExternalHoldPublisher:
 
 
 def servo_execute(demo, traj, free_joints, label, dt=0.20, track_tol=None, max_cmd_step=None):
+    execute_t0 = time.time()
     q0, _ = demo.dds.get_upper_body_state()
     q0_safe = G1JointConfiguration.clamp_positions(q0, G1JointGroup.UPPER_BODY)
     jlog("servo_precompute_start", label=label, q0=q0, qvel=maxqvel(), q0_clamp_delta=q0_safe - q0, free_joints=free_joints, contacts=contact_snapshot())
     set_gravity_hold(demo, q0, f"{label}_before_external_hold")
     ext = ExternalHoldPublisher(q0, hz=EXTERNAL_HOLD_HZ)
     ext.__enter__()
+    precompute_t0 = time.time()
     try:
         jt = compute_joint_trajectory(
             demo.ik_solver, demo.urdf_model, traj, q0, dt=dt,
@@ -959,11 +1634,14 @@ def servo_execute(demo, traj, free_joints, label, dt=0.20, track_tol=None, max_c
         set_gravity_hold(demo, q0, f"{label}_before_external_stop")
     finally:
         ext.__exit__(*sys.exc_info())
+    precompute_elapsed = time.time() - precompute_t0
     set_gravity_hold(demo, q0, f"{label}_after_external_hold")
     qv_after_precompute = maxqvel()
     upper_dq_after_precompute = upper_max_dq(demo.dds)
     q_after, _ = demo.dds.get_upper_body_state()
-    jlog("servo_precompute_done", label=label, qvel=qv_after_precompute, upper_max_dq=upper_dq_after_precompute, q_delta=q_after - q0, contacts=contact_snapshot())
+    jlog("servo_precompute_done", label=label, elapsed=precompute_elapsed,
+         qvel=qv_after_precompute, upper_max_dq=upper_dq_after_precompute,
+         q_delta=q_after - q0, contacts=contact_snapshot())
     if upper_dq_after_precompute > 0.5:
         jlog("servo_abort_precompute_motion", label=label, qvel=qv_after_precompute, upper_max_dq=upper_dq_after_precompute)
         return False, {"status": "precompute_motion", "max_qvel": qv_after_precompute, "max_cmd_err": 0.0}
@@ -994,6 +1672,7 @@ def servo_execute(demo, traj, free_joints, label, dt=0.20, track_tol=None, max_c
             max_path_step_q_after=jt.q[max_step_wi + 1] if len(jt.q) > 1 else jt.q[0],
             ik_abort_step=IK_ABORT_STEP,
         )
+        log_path_kinematics(demo, label, q0, jt.q)
         if max_path_step > IK_ABORT_STEP:
             jlog(
                 "servo_abort_ik_path_jump",
@@ -1015,7 +1694,10 @@ def servo_execute(demo, traj, free_joints, label, dt=0.20, track_tol=None, max_c
                 n=jt.n_waypoints,
                 duration=jt.duration,
             )
-            return execute_joint_traj_scaled(demo, jt, label, SCALED_JOINT_EXEC_SCALE)
+            ok, info = execute_joint_traj_scaled(demo, jt, label, SCALED_JOINT_EXEC_SCALE)
+            jlog("servo_execute_timing", label=label, ok=ok, total_elapsed=time.time() - execute_t0,
+                 precompute_elapsed=precompute_elapsed, info=info)
+            return ok, info
         jt.q[0] = q0.copy()
     q_path = jt.q
     if any(label.startswith(prefix) for prefix in JOINT_FINAL_LABEL_PREFIXES) and len(jt.q) > 1:
@@ -1027,7 +1709,8 @@ def servo_execute(demo, traj, free_joints, label, dt=0.20, track_tol=None, max_c
             final_delta=jt.q[-1] - q0,
             max_final_delta=float(np.max(np.abs(jt.q[-1] - q0))),
         )
-    return servo_joint_path(
+    run_t0 = time.time()
+    ok, info = servo_joint_path(
         demo.dds,
         q_path,
         label,
@@ -1035,6 +1718,9 @@ def servo_execute(demo, traj, free_joints, label, dt=0.20, track_tol=None, max_c
         max_cmd_step=max_cmd_step,
         urdf_model=demo.urdf_model,
     )
+    jlog("servo_execute_timing", label=label, ok=ok, total_elapsed=time.time() - execute_t0,
+         precompute_elapsed=precompute_elapsed, run_elapsed=time.time() - run_t0, info=info)
+    return ok, info
 
 
 def hold_measured(demo, label, duration=1.0, hz=50):
@@ -1054,17 +1740,22 @@ def hold_measured(demo, label, duration=1.0, hz=50):
 def servo_execute_replanned(demo, plan_fn, free_joints, label, attempts=4, dt=0.20, track_tol=None, max_cmd_step=None):
     last_info = None
     for attempt in range(attempts):
+        attempt_t0 = time.time()
         q_hold, _ = demo.dds.get_upper_body_state()
         jlog("servo_attempt_plan_start", label=label, attempt=attempt, q=q_hold, qvel=maxqvel(), upper_max_dq=upper_max_dq(demo.dds), contacts=contact_snapshot())
         set_gravity_hold(demo, q_hold, f"{label}_plan_before_external_hold_{attempt}")
+        plan_t0 = time.time()
         with ExternalHoldPublisher(q_hold, hz=EXTERNAL_HOLD_HZ):
             traj = plan_fn()
+        plan_elapsed = time.time() - plan_t0
         set_gravity_hold(demo, q_hold, f"{label}_plan_after_external_hold_{attempt}")
         q_after_plan, _ = demo.dds.get_upper_body_state()
         table_hits = has_right_hand_table_contact()
         start_qvel = maxqvel()
         start_upper_dq = upper_max_dq(demo.dds)
-        jlog("servo_attempt_start", label=label, attempt=attempt, n=traj.n_waypoints, duration=traj.duration, qvel=start_qvel, upper_max_dq=start_upper_dq, q_delta=q_after_plan - q_hold, table_hits=table_hits)
+        jlog("servo_attempt_start", label=label, attempt=attempt, n=traj.n_waypoints,
+             duration=traj.duration, plan_elapsed=plan_elapsed, qvel=start_qvel,
+             upper_max_dq=start_upper_dq, q_delta=q_after_plan - q_hold, table_hits=table_hits)
         if table_hits:
             if allow_table_contact_for_label(label):
                 jlog("servo_allow_table_contact_before_execute", label=label, attempt=attempt, hits=table_hits)
@@ -1086,7 +1777,8 @@ def servo_execute_replanned(demo, plan_fn, free_joints, label, attempts=4, dt=0.
             track_tol=track_tol,
             max_cmd_step=max_cmd_step,
         )
-        jlog("servo_attempt_done", label=label, attempt=attempt, ok=ok, info=info, qvel=maxqvel())
+        jlog("servo_attempt_done", label=label, attempt=attempt, ok=ok, info=info,
+             elapsed=time.time() - attempt_t0, plan_elapsed=plan_elapsed, qvel=maxqvel())
         last_info = info
         if ok:
             return True, {"attempts": attempt + 1, **info}
@@ -1107,8 +1799,30 @@ def plan_init(demo, duration=20.0):
 
 def plan_demo_init(demo, duration=20.0):
     left_start, right_start = demo._current_ee()
-    jlog("plan_demo_init_target", target=T_RIGHT_INIT)
-    return demo.planner.plan_through_waypoints([left_start, left_start], [right_start, T_RIGHT_INIT], duration=duration)
+    target = configured_right_init_pose()
+    jlog("plan_demo_init_target", target=target)
+    return demo.planner.plan_through_waypoints([left_start, left_start], [right_start, target], duration=duration)
+
+
+def plan_left_init(demo, duration=12.0):
+    left_start, right_start = demo._current_ee()
+    target = left_init_pose()
+    if INIT_KEEP_CURRENT_ROT:
+        target = with_current_rotation(target, left_start)
+    jlog("plan_left_init_target", target=target, keep_current_rot=INIT_KEEP_CURRENT_ROT)
+    return demo.planner.plan_through_waypoints([left_start, target], [right_start, right_start], duration=duration)
+
+
+def plan_both_init(demo, duration=12.0):
+    left_start, right_start = demo._current_ee()
+    left_target = left_init_pose()
+    right_target = right_wide_init_pose()
+    if INIT_KEEP_CURRENT_ROT:
+        left_target = with_current_rotation(left_target, left_start)
+        right_target = with_current_rotation(right_target, right_start)
+    jlog("plan_both_init_target", left_target=left_target, right_target=right_target,
+         keep_current_rot=INIT_KEEP_CURRENT_ROT)
+    return demo.planner.plan_through_waypoints([left_start, left_target], [right_start, right_target], duration=duration)
 
 
 def plan_right_to_brick_offset(demo, brick_pose, offset, duration=30.0):
@@ -1190,6 +1904,7 @@ def execute_staged_prepick(demo, brick_pose, offset, free_joints):
 
     last_info = {}
     for label, target_pose, duration in stages:
+        stage_t0 = time.time()
         ok, info = servo_execute_replanned(
             demo,
             lambda pose=target_pose, dur=duration: plan_right_to_pose(demo, pose, duration=dur),
@@ -1199,7 +1914,8 @@ def execute_staged_prepick(demo, brick_pose, offset, free_joints):
             dt=PICK_DT,
             track_tol=PICK_TRACK_TOL,
         )
-        jlog("staged_prepick_stage_done", label=label, ok=ok, info=info, qvel=maxqvel(),
+        jlog("staged_prepick_stage_done", label=label, ok=ok, info=info,
+             elapsed=time.time() - stage_t0, qvel=maxqvel(),
              upper_max_dq=upper_max_dq(demo.dds), contacts=contact_snapshot())
         last_info = {"stage": label, **info}
         if not ok:
@@ -1240,6 +1956,7 @@ def selected_place_row():
 
 
 def main():
+    run_t0 = time.time()
     jlog("start")
     wait_settled("initial")
     b0 = brick_states()
@@ -1281,10 +1998,24 @@ def main():
              preinit_right_shoulder_roll=PREINIT_RIGHT_SHOULDER_ROLL,
              preinit_max_cmd_step=PREINIT_MAX_CMD_STEP,
              preinit_track_tol=PREINIT_TRACK_TOL,
+             demo_max_dq_per_step=DEMO_MAX_DQ_PER_STEP,
+             demo_command_dq_scale=DEMO_COMMAND_DQ_SCALE,
+             demo_command_tau_mode=DEMO_COMMAND_TAU_MODE,
+             hybrid_max_cmd_step=HYBRID_MAX_CMD_STEP,
+             hybrid_track_tol=HYBRID_TRACK_TOL,
+             hybrid_cmd_hz=HYBRID_CMD_HZ,
+             hybrid_stall_timeout=HYBRID_STALL_TIMEOUT,
+             hybrid_upper_dq_recover=HYBRID_UPPER_DQ_RECOVER,
+             hybrid_max_recoveries=HYBRID_MAX_RECOVERIES,
+             hybrid_servo_mode=HYBRID_SERVO_MODE,
+             hybrid_stream_dq_hold=HYBRID_STREAM_DQ_HOLD,
              preinit_left_park=PREINIT_LEFT_PARK,
              preinit_left_park_q=PREINIT_LEFT_PARK_Q,
              initial_hand_settle_timeout=INITIAL_HAND_SETTLE_TIMEOUT,
              run_scaled_init=RUN_SCALED_INIT,
+             run_demo_init=RUN_DEMO_INIT,
+             demo_init_duration=DEMO_INIT_DURATION,
+             init_executor=INIT_EXECUTOR,
              scaled_init_duration=SCALED_INIT_DURATION,
              scaled_init_exec_scale=SCALED_INIT_EXEC_SCALE,
              post_grasp_lift_z=POST_GRASP_LIFT_Z,
@@ -1295,7 +2026,10 @@ def main():
              skip_pick_return_before_place=SKIP_PICK_RETURN_BEFORE_PLACE,
              skip_place_return_after_release=SKIP_PLACE_RETURN_AFTER_RELEASE,
              success_target_dist=SUCCESS_TARGET_DIST,
-             place_require_pickable=PLACE_REQUIRE_PICKABLE)
+             place_require_pickable=PLACE_REQUIRE_PICKABLE,
+             executor_test=EXECUTOR_TEST,
+             preinit_left_executor=PREINIT_LEFT_EXECUTOR,
+             init_keep_current_rot=INIT_KEEP_CURRENT_ROT)
         if hasattr(demo.camera, "stop"):
             demo.camera.stop()
         demo.camera = FileCamera()
@@ -1306,16 +2040,96 @@ def main():
         jlog("planner_config", waypoints_per_second=demo.planner.waypoints_per_second)
         twist = G1TwistCmdNode("lo")
 
-        if INITIAL_RIGHT_HAND_MODE != "none":
-            if not set_initial_hands(demo):
-                return 5
-            time.sleep(0.5)
-            if not wait_settled("after_initial_hand", limit=0.10, timeout=INITIAL_HAND_SETTLE_TIMEOUT):
-                jlog("abort_initial_hand_not_settled", qvel=maxqvel(), upper_max_dq=upper_max_dq(demo.dds))
-                return 5
-        else:
-            set_initial_hands(demo)
-        if PREINIT_RECOVERY:
+        with timed_phase("init"):
+            if INITIAL_RIGHT_HAND_MODE != "none":
+                if not set_initial_hands(demo):
+                    return 5
+                time.sleep(0.5)
+                if not wait_settled("after_initial_hand", limit=0.10, timeout=INITIAL_HAND_SETTLE_TIMEOUT):
+                    jlog("abort_initial_hand_not_settled", qvel=maxqvel(), upper_max_dq=upper_max_dq(demo.dds))
+                    return 5
+            else:
+                set_initial_hands(demo)
+            if EXECUTOR_TEST == "right_init":
+                if PREINIT_LEFT_EXECUTOR == "demo":
+                    ok, info = execute_demo_controller(
+                        demo,
+                        lambda: plan_demo_init(demo, duration=EXECUTOR_TEST_INIT_DURATION),
+                        demo.ik_solver.right_q_idx,
+                        "right_init",
+                    )
+                elif PREINIT_LEFT_EXECUTOR == "scaled":
+                    ok, info = execute_scaled_replanned(
+                        demo,
+                        lambda: plan_demo_init(demo, duration=EXECUTOR_TEST_INIT_DURATION),
+                        demo.ik_solver.right_q_idx,
+                        "right_init",
+                        dt=0.20,
+                    )
+                elif PREINIT_LEFT_EXECUTOR == "hybrid":
+                    ok, info = execute_hybrid_replanned(
+                        demo,
+                        lambda: plan_demo_init(demo, duration=EXECUTOR_TEST_INIT_DURATION),
+                        demo.ik_solver.right_q_idx,
+                        "right_init",
+                    )
+                elif PREINIT_LEFT_EXECUTOR == "servo":
+                    ok, info = servo_execute_replanned(
+                        demo,
+                        lambda: plan_demo_init(demo, duration=EXECUTOR_TEST_INIT_DURATION),
+                        demo.ik_solver.right_q_idx,
+                        "right_init",
+                        attempts=1,
+                        dt=0.20,
+                        track_tol=PREINIT_TRACK_TOL,
+                        max_cmd_step=PREINIT_MAX_CMD_STEP,
+                    )
+                else:
+                    raise ValueError(f"unknown PREINIT_LEFT_EXECUTOR={PREINIT_LEFT_EXECUTOR!r}")
+                jlog("executor_test_done", test=EXECUTOR_TEST, ok=ok, info=info,
+                     qvel=maxqvel(), upper_max_dq=upper_max_dq(demo.dds),
+                     contacts=contact_snapshot())
+                return 0 if ok else 5
+            if EXECUTOR_TEST == "both_init":
+                if PREINIT_LEFT_EXECUTOR == "demo":
+                    ok, info = execute_demo_controller(
+                        demo,
+                        lambda: plan_both_init(demo, duration=EXECUTOR_TEST_INIT_DURATION),
+                        demo.ik_solver.both_arms_q_idx,
+                        "both_init",
+                    )
+                elif PREINIT_LEFT_EXECUTOR == "scaled":
+                    ok, info = execute_scaled_replanned(
+                        demo,
+                        lambda: plan_both_init(demo, duration=EXECUTOR_TEST_INIT_DURATION),
+                        demo.ik_solver.both_arms_q_idx,
+                        "both_init",
+                        dt=0.20,
+                    )
+                elif PREINIT_LEFT_EXECUTOR == "hybrid":
+                    ok, info = execute_hybrid_replanned(
+                        demo,
+                        lambda: plan_both_init(demo, duration=EXECUTOR_TEST_INIT_DURATION),
+                        demo.ik_solver.both_arms_q_idx,
+                        "both_init",
+                    )
+                elif PREINIT_LEFT_EXECUTOR == "servo":
+                    ok, info = servo_execute_replanned(
+                        demo,
+                        lambda: plan_both_init(demo, duration=EXECUTOR_TEST_INIT_DURATION),
+                        demo.ik_solver.both_arms_q_idx,
+                        "both_init",
+                        attempts=1,
+                        dt=0.20,
+                        track_tol=PREINIT_TRACK_TOL,
+                        max_cmd_step=PREINIT_MAX_CMD_STEP,
+                    )
+                else:
+                    raise ValueError(f"unknown PREINIT_LEFT_EXECUTOR={PREINIT_LEFT_EXECUTOR!r}")
+                jlog("executor_test_done", test=EXECUTOR_TEST, ok=ok, info=info,
+                     qvel=maxqvel(), upper_max_dq=upper_max_dq(demo.dds),
+                     contacts=contact_snapshot())
+                return 0 if ok else 5
             if PREINIT_LEFT_PARK:
                 if not preinit_left_park(demo):
                     jlog("abort_preinit_left_park", qvel=maxqvel(), upper_max_dq=upper_max_dq(demo.dds), contacts=contact_snapshot())
@@ -1324,49 +2138,90 @@ def main():
                 if not wait_settled("after_preinit_left_park", limit=0.10, timeout=12):
                     jlog("abort_preinit_left_park_not_settled", qvel=maxqvel(), upper_max_dq=upper_max_dq(demo.dds), contacts=contact_snapshot())
                     return 5
-            if not preinit_recovery(demo):
-                jlog("abort_preinit_recovery", qvel=maxqvel(), upper_max_dq=upper_max_dq(demo.dds), contacts=contact_snapshot())
-                return 5
-            time.sleep(0.5)
-            if not wait_settled("after_preinit_recovery", limit=0.10, timeout=12):
-                jlog("abort_preinit_recovery_not_settled", qvel=maxqvel(), upper_max_dq=upper_max_dq(demo.dds), contacts=contact_snapshot())
-                return 5
-            if os.environ.get("STOP_AFTER_PREINIT", "0") == "1":
-                jlog("stop_after_preinit", qvel=maxqvel(), upper_max_dq=upper_max_dq(demo.dds), bricks=brick_states(), contacts=contact_snapshot())
+            if EXECUTOR_TEST == "left_init" or os.environ.get("STOP_AFTER_PREINIT", "0") == "1":
+                jlog("stop_after_preinit", executor_test=EXECUTOR_TEST, qvel=maxqvel(),
+                     upper_max_dq=upper_max_dq(demo.dds), bricks=brick_states(),
+                     contacts=contact_snapshot())
                 return 0
-        if RUN_SCALED_INIT:
-            ok, info = scaled_init(demo)
-            jlog("scaled_init_done", ok=ok, info=info, qvel=maxqvel(), contacts=contact_snapshot())
-            if not ok:
-                return 2
-            set_hands(demo, "open_after_scaled_init", "open")
-            time.sleep(1.0)
-            if not wait_settled("after_scaled_init_open", limit=0.10, timeout=30):
-                jlog("abort_scaled_init_open_not_settled", qvel=maxqvel(), contacts=contact_snapshot())
-                return 5
-            if os.environ.get("STOP_AFTER_INIT", "0") == "1":
-                jlog("stop_after_scaled_init", qvel=maxqvel(), bricks=brick_states(), contacts=contact_snapshot())
-                return 0
-        elif os.environ.get("RUN_INIT", "0") == "1":
-            ok, info = servo_execute_replanned(
-                demo,
-                lambda: plan_init(demo),
-                demo.ik_solver.right_q_idx,
-                "init",
-                attempts=2,
-                dt=0.10,
-                track_tol=INIT_TRACK_TOL,
-                max_cmd_step=INIT_MAX_CMD_STEP,
-            )
-            jlog("init_done", ok=ok, info=info, qvel=maxqvel())
-            if not ok:
-                return 2
-            if os.environ.get("STOP_AFTER_INIT", "0") == "1":
-                jlog("stop_after_init", qvel=maxqvel(), bricks=brick_states(), contacts=contact_snapshot())
-                return 0
-        else:
-            hold_measured(demo, "init_skipped_hold", duration=2.0)
-            jlog("init_skipped", reason="init servo can be unsafe; pick starts from measured rest pose")
+            if PREINIT_RECOVERY:
+                if not preinit_recovery(demo):
+                    jlog("abort_preinit_recovery", qvel=maxqvel(), upper_max_dq=upper_max_dq(demo.dds), contacts=contact_snapshot())
+                    return 5
+                time.sleep(0.5)
+                if not wait_settled("after_preinit_recovery", limit=0.10, timeout=12):
+                    jlog("abort_preinit_recovery_not_settled", qvel=maxqvel(), upper_max_dq=upper_max_dq(demo.dds), contacts=contact_snapshot())
+                    return 5
+            if RUN_DEMO_INIT:
+                if INIT_EXECUTOR == "demo":
+                    ok, info = execute_demo_controller(
+                        demo,
+                        lambda: plan_demo_init(demo, duration=DEMO_INIT_DURATION),
+                        demo.ik_solver.right_q_idx,
+                        "init_demo",
+                    )
+                elif INIT_EXECUTOR == "hybrid":
+                    ok, info = execute_hybrid_replanned(
+                        demo,
+                        lambda: plan_demo_init(demo, duration=DEMO_INIT_DURATION),
+                        demo.ik_solver.right_q_idx,
+                        "init_demo",
+                    )
+                elif INIT_EXECUTOR == "servo":
+                    ok, info = servo_execute_replanned(
+                        demo,
+                        lambda: plan_demo_init(demo, duration=DEMO_INIT_DURATION),
+                        demo.ik_solver.right_q_idx,
+                        "init_demo",
+                        attempts=1,
+                        dt=0.20,
+                        track_tol=INIT_TRACK_TOL,
+                        max_cmd_step=INIT_MAX_CMD_STEP,
+                    )
+                else:
+                    raise ValueError(f"unknown INIT_EXECUTOR={INIT_EXECUTOR!r}")
+                jlog("demo_init_done", ok=ok, executor=INIT_EXECUTOR, info=info, qvel=maxqvel(), contacts=contact_snapshot())
+                if not ok:
+                    return 2
+                time.sleep(0.5)
+                if not wait_settled("after_demo_init", limit=0.10, timeout=30):
+                    jlog("abort_demo_init_not_settled", qvel=maxqvel(), upper_max_dq=upper_max_dq(demo.dds), contacts=contact_snapshot())
+                    return 5
+                if os.environ.get("STOP_AFTER_INIT", "0") == "1":
+                    jlog("stop_after_demo_init", qvel=maxqvel(), bricks=brick_states(), contacts=contact_snapshot())
+                    return 0
+            elif RUN_SCALED_INIT:
+                ok, info = scaled_init(demo)
+                jlog("scaled_init_done", ok=ok, info=info, qvel=maxqvel(), contacts=contact_snapshot())
+                if not ok:
+                    return 2
+                set_hands(demo, "open_after_scaled_init", "open")
+                time.sleep(1.0)
+                if not wait_settled("after_scaled_init_open", limit=0.10, timeout=30):
+                    jlog("abort_scaled_init_open_not_settled", qvel=maxqvel(), contacts=contact_snapshot())
+                    return 5
+                if os.environ.get("STOP_AFTER_INIT", "0") == "1":
+                    jlog("stop_after_scaled_init", qvel=maxqvel(), bricks=brick_states(), contacts=contact_snapshot())
+                    return 0
+            elif os.environ.get("RUN_INIT", "0") == "1":
+                ok, info = servo_execute_replanned(
+                    demo,
+                    lambda: plan_init(demo),
+                    demo.ik_solver.right_q_idx,
+                    "init",
+                    attempts=2,
+                    dt=0.10,
+                    track_tol=INIT_TRACK_TOL,
+                    max_cmd_step=INIT_MAX_CMD_STEP,
+                )
+                jlog("init_done", ok=ok, info=info, qvel=maxqvel())
+                if not ok:
+                    return 2
+                if os.environ.get("STOP_AFTER_INIT", "0") == "1":
+                    jlog("stop_after_init", qvel=maxqvel(), bricks=brick_states(), contacts=contact_snapshot())
+                    return 0
+            else:
+                hold_measured(demo, "init_skipped_hold", duration=2.0)
+                jlog("init_skipped", reason="init servo can be unsafe; pick starts from measured rest pose")
 
         q_nav_hold, _ = demo.dds.get_upper_body_state()
         with HoldPublisher(demo.dds, q_nav_hold, demo.urdf_model, hz=NAV_HOLD_HZ):
@@ -1629,7 +2484,8 @@ def main():
                 demo.shutdown()
             except Exception as e:
                 jlog("shutdown_error", err=repr(e))
-        jlog("end")
+        log_phase_summary()
+        jlog("end", elapsed=time.time() - run_t0)
 
 
 if __name__ == "__main__":

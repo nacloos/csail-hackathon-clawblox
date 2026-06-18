@@ -8,8 +8,17 @@ mode = "external"
 command = [
   "uv", "run", "--project", "../..",
   "python", "../../server.py",
-  "--dual-panda",
+  "--scene", "models/generated_scene.xml",
 ]
+
+[replay]
+command = [
+  "uv", "run", "--project", "../..",
+  "python", "../../replay.py",
+  "{recording}",
+  "--port", "{port}",
+]
+
 
 [agent]
 source_workspace = true

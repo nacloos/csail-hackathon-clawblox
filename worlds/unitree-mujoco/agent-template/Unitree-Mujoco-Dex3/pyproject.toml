@@ -1,0 +1,12 @@
+[project]
+name = "unitree-mujoco-dex3"
+version = "0.1.0"
+requires-python = ">=3.8"
+dependencies = [
+    "unitree_sdk2py @ file:///storage/nacloos/projects/unitree_sdk2_python",
+    "mujoco",
+    "pygame",
+]
+
+[tool.setuptools]
+packages = []
