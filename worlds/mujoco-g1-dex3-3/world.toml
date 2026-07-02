@@ -1,0 +1,29 @@
+name = "MuJoCo G1 Dex3 3 (DDS)"
+description = "Free-base Unitree G1 controlled over the Unitree SDK2 DDS interface (deploy in sim or on the real robot)."
+
+[runtime]
+mode = "external"
+
+# Control transport: the Unitree SDK2 DDS bus (unitree_hg LowCmd_/LowState_).
+# Actuate allocates a per-run domain id (and the sandbox's network facet); the
+# server reads WORLD_DDS_DOMAIN_ID / WORLD_DDS_INTERFACE. See the transport docs.
+[transport]
+type = "dds"
+
+[run]
+command = [
+  "uv", "run", "--project", "../..",
+  "python", "server.py",
+]
+
+[replay]
+command = [
+  "uv", "run", "--project", "../..",
+  "python", "../../replay.py",
+  "{recording}",
+  "--port", "{port}",
+]
+
+[agent]
+source_workspace = true
+server_source = "server.py"
