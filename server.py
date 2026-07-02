@@ -255,16 +255,23 @@ class LiveSpectator:
 
     def _run(self) -> None:
         delay = 1.0 / max(1.0, self.update_hz)
+        # Render from a private copy of the state so the sim thread is only
+        # blocked for a fast mj_copyData, not the whole viser scene update. This
+        # keeps a realtime sim loop (e.g. a 500Hz DDS control world) at realtime
+        # even while the spectator is live.
+        snapshot = mujoco.MjData(self.sim.model)
         while not self.stop_event.is_set():
             with self.sim.lock:
-                self.scene.update_from_mjdata(self.sim.data)
-                self.status.content = (
-                    "<div style='font-size:0.9em; line-height:1.35'>"
-                    "<strong>Status:</strong> Live<br/>"
-                    f"<strong>Tick:</strong> {self.sim.tick}<br/>"
-                    f"<strong>Time:</strong> {float(self.sim.data.time):.2f}s"
-                    "</div>"
-                )
+                mujoco.mj_copyData(snapshot, self.sim.model, self.sim.data)
+                tick = self.sim.tick
+            self.scene.update_from_mjdata(snapshot)
+            self.status.content = (
+                "<div style='font-size:0.9em; line-height:1.35'>"
+                "<strong>Status:</strong> Live<br/>"
+                f"<strong>Tick:</strong> {tick}<br/>"
+                f"<strong>Time:</strong> {float(snapshot.time):.2f}s"
+                "</div>"
+            )
             time.sleep(delay)
 
 
