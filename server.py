@@ -6,7 +6,7 @@ import base64
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 import http.client
 import importlib.util
 import json
@@ -277,6 +277,8 @@ class SimState:
         record_path: Path | None = None,
         record_config: RecordingConfig | None = None,
         resume_path: Path | None = None,
+        dds_domain: int | None = None,
+        dds_interface: str = "lo",
     ) -> None:
         if control_groups not in {"single", "prefix"}:
             raise ValueError(f"unknown control grouping mode: {control_groups}")
@@ -302,6 +304,14 @@ class SimState:
         self.control_groups_by_name = {group.name: group for group in self.control_groups}
         self.object_body_ids = self.find_object_body_ids_locked()
         self.sessions: dict[str, Session] = {}
+        # Optional Unitree SDK2 DDS control bridge (rt/lowcmd -> PD -> ctrl,
+        # publish rt/lowstate). Enabled only when a DDS domain is configured, so
+        # HTTP-only worlds never import cyclonedds/unitree_sdk2py.
+        self.dds = None
+        if dds_domain is not None:
+            from g1_dds import G1DdsBridge
+
+            self.dds = G1DdsBridge(self.model, dds_domain, dds_interface)
         self.reset()
         if resume_path is not None:
             self.restore_snapshot(json.loads(Path(resume_path).read_text(encoding="utf-8")))
@@ -382,6 +392,12 @@ class SimState:
             "blocks": objects,
             "robots": self.robots_locked(),
             "session": self.session_payload(session) if session else None,
+            "dds": None if self.dds is None else {
+                "domain_id": self.dds.domain_id,
+                "interface": self.dds.interface,
+                "topics": {"command": "rt/lowcmd", "state": "rt/lowstate"},
+                "have_command": self.dds.have_command,
+            },
         }
 
     def join(self, name: str, existing_session_id: str | None = None) -> dict[str, Any]:
@@ -676,7 +692,7 @@ class SimState:
                 "agent_name": session.name,
                 "message_type": "text",
                 "content": content,
-                "created_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+                "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
                 "delivery_mode": "global",
                 "hearing_radius": None,
                 "heard_by": heard_by,
@@ -805,11 +821,17 @@ class SimState:
     def _run_realtime(self) -> None:
         next_step = time.perf_counter()
         timestep = float(self.model.opt.timestep)
+        if self.dds is not None:
+            self.dds.setup()
 
         while not self.stop_event.is_set():
             with self.lock:
+                if self.dds is not None:
+                    self.dds.apply_control(self.data)
                 mujoco.mj_step(self.model, self.data)
                 self.tick += 1
+                if self.dds is not None:
+                    self.dds.publish_state(self.data, self.tick)
                 if self.recorder is not None:
                     self.recorder.record_step(self.tick, self.model, self.data)
                     if time.perf_counter() - self.last_recording_flush > 5.0:
@@ -1135,6 +1157,17 @@ def main() -> None:
         default=env_path("WORLD_RESUME_PATH"),
         help="Restore full world state from a snapshot file before serving.",
     )
+    parser.add_argument(
+        "--dds-domain",
+        type=int,
+        default=env_int("WORLD_DDS_DOMAIN_ID", -1),
+        help="Enable the Unitree SDK2 DDS control bridge on this domain (-1 = off).",
+    )
+    parser.add_argument(
+        "--dds-interface",
+        default=os.environ.get("WORLD_DDS_INTERFACE", "lo"),
+        help="Network interface the DDS bus binds (default lo).",
+    )
     args = parser.parse_args()
     api_doc = args.api_doc or (Path.cwd() / "API.md" if (Path.cwd() / "API.md").exists() else API_DOC)
     if not api_doc.is_absolute():
@@ -1160,6 +1193,8 @@ def main() -> None:
             checkpoint_seconds=args.checkpoint_seconds,
         ),
         resume_path=resume_path,
+        dds_domain=args.dds_domain if args.dds_domain >= 0 else None,
+        dds_interface=args.dds_interface,
     )
     spectator = None
     if not args.no_spectator:

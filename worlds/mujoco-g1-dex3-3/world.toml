@@ -10,14 +10,17 @@ mode = "external"
 [transport]
 type = "dds"
 
-# The world runs in the same self-contained conda env the sandboxed agent uses
+# Uses the full repo server.py (spectator, sessions, snapshot, recording) with
+# its optional DDS control bridge enabled by WORLD_DDS_DOMAIN_ID. It runs in the
+# same self-contained conda env the sandboxed agent uses
 # (/sandbox-deps/envs/unitree-mujoco), so both speak the exact same CycloneDDS
 # (0.10.2) and unitree_hg IDL — a version mismatch otherwise segfaults DDS type
-# discovery. The env carries mujoco + cyclonedds + unitree_sdk2py + fastapi.
+# discovery. That env carries mujoco + cyclonedds + unitree_sdk2py + fastapi +
+# uvicorn + h5py + viser/mjviser (the spectator).
 [run]
 command = [
   "bash", "-lc",
-  "conda_base=$(conda info --base) && unset VIRTUAL_ENV && exec \"$conda_base/envs/unitree-mujoco/bin/python\" server.py",
+  "conda_base=$(conda info --base) && unset VIRTUAL_ENV && exec \"$conda_base/envs/unitree-mujoco/bin/python\" ../../server.py --scene models/g1/scene_29dof.xml --control-groups single",
 ]
 
 [replay]
@@ -30,4 +33,4 @@ command = [
 
 [agent]
 source_workspace = true
-server_source = "server.py"
+server_source = "../../server.py"
