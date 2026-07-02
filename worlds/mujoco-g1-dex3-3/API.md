@@ -9,12 +9,20 @@ session lifecycle, and read-only debugging.
 
 ## Control Interface (DDS)
 
-CycloneDDS, carrying `unitree_hg` IDL messages:
+CycloneDDS, carrying `unitree_hg` IDL messages. The body (legs/waist/arms) is
+torque-controlled; the two Dex3 hands are position-controlled on separate topics:
 
 | Direction | Topic | Message |
 |-----------|-------|---------|
-| command (you publish) | `rt/lowcmd` | `unitree_hg::msg::dds_::LowCmd_` |
-| state (you subscribe) | `rt/lowstate` | `unitree_hg::msg::dds_::LowState_` |
+| body command (publish) | `rt/lowcmd` | `LowCmd_` (per-motor q/dq/kp/kd/tau) |
+| body state (subscribe) | `rt/lowstate` | `LowState_` |
+| hand command (publish) | `rt/dex3/left/cmd`, `rt/dex3/right/cmd` | `HandCmd_` (7 motors, target q) |
+| hand state (subscribe) | `rt/dex3/left/state`, `rt/dex3/right/state` | `HandState_` |
+
+The scene is a table with bricks — a manipulation setup. Body motors are torque
+(`ctrl = kp·(q−q̂) + kd·(dq−dq̂) + tau`); Dex3 hand motors are **position
+servos** (the target `q` is applied directly). Each hand's 7 motors are, in IDL
+order: `thumb_0, thumb_1, thumb_2, index_0, index_1, middle_0, middle_1`.
 
 The bus coordinates for your run are provided in the environment and echoed by
 `POST /join` and `GET /observe`:

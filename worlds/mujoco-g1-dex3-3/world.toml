@@ -20,7 +20,7 @@ type = "dds"
 [run]
 command = [
   "bash", "-lc",
-  "conda_base=$(conda info --base) && unset VIRTUAL_ENV && exec \"$conda_base/envs/unitree-mujoco/bin/python\" ../../server.py --scene models/g1/scene_29dof.xml --control-groups single --no-spectator",
+  "conda_base=$(conda info --base) && unset VIRTUAL_ENV && exec \"$conda_base/envs/unitree-mujoco/bin/python\" ../../server.py --scene models/g1/scene_hands_modified.xml --control-groups single --no-spectator",
 ]
 
 # The spectator runs as a sidecar: its own process (and tmux window), so viser's
@@ -30,7 +30,7 @@ command = [
 name = "spectator"
 command = [
   "bash", "-lc",
-  "conda_base=$(conda info --base) && unset VIRTUAL_ENV && exec \"$conda_base/envs/unitree-mujoco/bin/python\" ../../spectate.py --scene models/g1/scene_29dof.xml",
+  "conda_base=$(conda info --base) && unset VIRTUAL_ENV && exec \"$conda_base/envs/unitree-mujoco/bin/python\" ../../spectate.py --scene models/g1/scene_hands_modified.xml",
 ]
 
 [replay]
