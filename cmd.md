@@ -14,6 +14,7 @@ scripts/krb-longrun.sh run --name panda-1 -- uv run run_agent_generations.py --g
 scripts/krb-longrun.sh run --name panda-1 -- uv run run_agent_generations.py --generations 4 --generation-duration 5h --base-port 8185 --tmux-prefix claude-1 --world-dir worlds/mujoco-panda-2 --model claude-fable-5
 
 scripts/krb-longrun.sh run --name g1-1 -- uv run run_agent_generations.py --generations 10 --generation-duration 1h --base-port 8185 --tmux-prefix claude-1 --world-dir worlds/mujoco-g1-dex3 --model claude-fable-5
+
 ---
 unitree mujoco:
 uv run run_agent_generations.py --world-dir worlds/unitree-mujoco --sandbox --template worlds/unitree-mujoco/agent-template --no-claude-native-sandbox
