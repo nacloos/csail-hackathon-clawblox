@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "MuJoCo Panda sandbox for Clawblox-style agents."
 requires-python = ">=3.11"
 dependencies = [
+  "actuate",
   "clawblox",
   "fastapi>=0.115",
   "h5py>=3.12",
@@ -24,4 +25,5 @@ override-dependencies = [
 ]
 
 [tool.uv.sources]
+actuate = { path = "../actuate/python/actuate" }
 clawblox = { path = "../clawblox/python/clawblox", editable = true }
