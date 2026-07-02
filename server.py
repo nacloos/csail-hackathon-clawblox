@@ -213,11 +213,15 @@ class SimState:
         self,
         scene: Path,
         *,
+        control_groups: str = "single",
         record_path: Path | None = None,
         record_config: RecordingConfig | None = None,
         resume_path: Path | None = None,
     ) -> None:
+        if control_groups not in {"single", "prefix"}:
+            raise ValueError(f"unknown control grouping mode: {control_groups}")
         self.scene = scene.resolve()
+        self.control_group_mode = control_groups
         self.scene_hash = scene_hash(self.scene)
         self.state_sig = default_state_sig()
         self.model = mujoco.MjModel.from_xml_path(str(self.scene))
@@ -791,6 +795,8 @@ class SimState:
     def find_control_groups_locked(self) -> list[ControlGroup]:
         if self.model.nu == 0:
             return []
+        if self.control_group_mode == "single":
+            return [ControlGroup("robot", tuple(range(self.model.nu)))]
 
         prefixed: dict[str, list[int]] = {}
         unprefixed: list[int] = []
@@ -932,6 +938,15 @@ def main() -> None:
     parser.add_argument("--spectator-hz", type=float, default=30.0)
     parser.add_argument("--dual-panda", action="store_true", help="Run one shared world with left/right Panda arms.")
     parser.add_argument(
+        "--control-groups",
+        choices=("single", "prefix"),
+        default=os.environ.get("WORLD_CONTROL_GROUPS", "single"),
+        help=(
+            "How to expose actuators to agent sessions. 'single' exposes one whole-robot "
+            "controller; 'prefix' groups actuators by the name prefix before the first underscore."
+        ),
+    )
+    parser.add_argument(
         "--record",
         action=argparse.BooleanOptionalAction,
         default=env_bool("WORLD_RECORD", False),
@@ -965,6 +980,7 @@ def main() -> None:
         resume_path = Path.cwd() / resume_path
     local_sim = SimState(
         scene,
+        control_groups=args.control_groups,
         record_path=record_path,
         record_config=RecordingConfig(
             preview_hz=args.preview_hz,

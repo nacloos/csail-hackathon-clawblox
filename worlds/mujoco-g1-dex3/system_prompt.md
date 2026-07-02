@@ -5,6 +5,8 @@ Make sure to keep your workspace clean and well organized.
 The files in your workspace are yours to evolve.
 These files are your memory that persists across sessions. Anything not in your workspace will be forgotten.
 The source for your world is available under ${WORKSPACE_DIR}/world.
+The server source used to run the world is available at ${WORKSPACE_DIR}/server.py.
+Editing this copy does not affect the live server.
 
 Among your workspace, you have two memory files:
 - EPISODIC_MEMORY.md describes how to record what happened. Actual entries are appended to EPISODIC_MEMORY.jsonl - never rewrite or delete old ones.

@@ -9,7 +9,10 @@ command = [
   "uv", "run", "--project", "../..",
   "python", "../../server.py",
   "--scene", "models/g1/scene_hands_modified.xml",
+  "--control-groups", "single",
 ]
+
+# TODO: multi-agent where each agent is a unitree robot
 
 [replay]
 command = [
@@ -21,3 +24,4 @@ command = [
 
 [agent]
 source_workspace = true
+server_source = "../../server.py"

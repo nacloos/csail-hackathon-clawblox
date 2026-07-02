@@ -95,7 +95,14 @@ def agent_auth_env() -> dict[str, str]:
     return {}
 
 
-def copy_workspace(template: Path, workspace: Path, world_dir: Path, *, copy_world: bool) -> None:
+def copy_workspace(
+    template: Path,
+    workspace: Path,
+    world_dir: Path,
+    *,
+    copy_world: bool,
+    server_source: Path | None = None,
+) -> None:
     if not template.is_dir():
         raise SystemExit(f"agent template directory not found: {template}")
 
@@ -117,6 +124,11 @@ def copy_workspace(template: Path, workspace: Path, world_dir: Path, *, copy_wor
             }
 
         shutil.copytree(world_dir, workspace / "world", ignore=ignore, dirs_exist_ok=True)
+
+    if server_source is not None:
+        if not server_source.is_file():
+            raise SystemExit(f"configured server source file not found: {server_source}")
+        shutil.copy2(server_source, workspace / "server.py")
 
 
 def render_system_prompt(path: Path, values: dict[str, str]) -> str:
@@ -387,6 +399,8 @@ def run_generation(
 
     world = World(dir=world_dir)
     copy_world_source = bool(world.config.get("agent", {}).get("source_workspace", True))
+    server_source_config = world.config.get("agent", {}).get("server_source")
+    server_source = root_path(world_dir / server_source_config) if server_source_config else None
     agents: list[Agent] = []
     started_agents: list[object] = []
     agent_dirs: list[Path] = []
@@ -438,7 +452,13 @@ def run_generation(
                 agent_name = safe_name(f"{display_name}-r{run_id}-w0-a{idx}")
                 agent_dir = agents_root / agent_name
                 workspace = agent_dir / "workspace"
-                copy_workspace(templates[idx], workspace, world_dir, copy_world=copy_world_source)
+                copy_workspace(
+                    templates[idx],
+                    workspace,
+                    world_dir,
+                    copy_world=copy_world_source,
+                    server_source=server_source,
+                )
             agent = Agent(
                 agent=args.backend,
                 name=agent_name,

@@ -9,6 +9,7 @@ command = [
   "uv", "run", "--project", "../..",
   "python", "../../server.py",
   "--scene", "models/generated_scene.xml",
+  "--control-groups", "prefix",
 ]
 
 [replay]

@@ -9,6 +9,7 @@ command = [
   "uv", "run", "--project", "../..",
   "python", "../../server.py",
   "--scene", "models/panda_cube/scene.xml",
+  "--control-groups", "single",
 ]
 
 [replay]
