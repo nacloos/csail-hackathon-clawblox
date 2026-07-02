@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 import urllib.request
 
@@ -25,17 +26,22 @@ from mjviser.scene import ViserMujocoScene
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scene", required=True, help="Scene XML the world runs.")
-    ap.add_argument("--port", type=int, default=8080, help="World HTTP port.")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("WORLD_PORT", "8080")),
+                    help="World HTTP port (default $WORLD_PORT, so it works as a sidecar).")
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--spectator-port", type=int, default=0, help="0 = pick a free port.")
+    ap.add_argument("--spectator-port", type=int,
+                    default=int(os.environ.get("WORLD_SPECTATOR_PORT", "0")),
+                    help="0 = world port + 1000; the URL is printed on start.")
     ap.add_argument("--hz", type=float, default=30.0)
     args = ap.parse_args()
+    if args.spectator_port == 0:
+        args.spectator_port = args.port + 1000
 
     model = mujoco.MjModel.from_xml_path(args.scene)
     data = mujoco.MjData(model)
     server = viser.ViserServer(
         host=args.host,
-        port=args.spectator_port or None,
+        port=args.spectator_port,
         label="MuJoCo spectator",
     )
     scene = ViserMujocoScene(server, model, num_envs=1)

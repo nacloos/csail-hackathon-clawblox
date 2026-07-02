@@ -20,7 +20,17 @@ type = "dds"
 [run]
 command = [
   "bash", "-lc",
-  "conda_base=$(conda info --base) && unset VIRTUAL_ENV && exec \"$conda_base/envs/unitree-mujoco/bin/python\" ../../server.py --scene models/g1/scene_29dof.xml --control-groups single",
+  "conda_base=$(conda info --base) && unset VIRTUAL_ENV && exec \"$conda_base/envs/unitree-mujoco/bin/python\" ../../server.py --scene models/g1/scene_29dof.xml --control-groups single --no-spectator",
+]
+
+# The spectator runs as a sidecar: its own process (and tmux window), so viser's
+# rendering never shares the sim's GIL and the world holds full 500Hz realtime.
+# It reads WORLD_PORT from the shared env and prints its browser URL on start.
+[[run.sidecar]]
+name = "spectator"
+command = [
+  "bash", "-lc",
+  "conda_base=$(conda info --base) && unset VIRTUAL_ENV && exec \"$conda_base/envs/unitree-mujoco/bin/python\" ../../spectate.py --scene models/g1/scene_29dof.xml",
 ]
 
 [replay]
