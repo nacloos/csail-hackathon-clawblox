@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import http.client
 import importlib.util
 import json
 import os
@@ -17,11 +19,12 @@ from typing import Any
 
 import numpy as np
 
-from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
 import mujoco
 import uvicorn
+import websockets
 
 ROOT = Path(__file__).resolve().parent
 SCENE = ROOT / "worlds" / "mujoco-panda" / "models" / "panda_cube" / "scene.xml"
@@ -149,6 +152,7 @@ class LiveSpectator:
         host: str,
         port: int,
         public_host: str,
+        token: str | None = None,
         update_hz: float = 30.0,
     ) -> None:
         try:
@@ -159,14 +163,18 @@ class LiveSpectator:
 
         self.sim = sim
         self.host = host
-        self.port = port
         self.public_host = public_host
         self.update_hz = update_hz
-        self.token = str(uuid4())
+        self.token = token or str(uuid4())
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
         self.server = viser.ViserServer(host=host, port=port, label="MuJoCo spectator")
+        self.port = int(self.server.get_port())
+        self._disable_spectator_lod()
         self.scene = ViserMujocoScene(self.server, sim.model, num_envs=1)
+        self._configure_spectator_lighting()
+        self._enable_fixed_geom_shadows()
+        self._wrap_visual_rebuild_for_fixed_geom_shadows()
         self.status = self.server.gui.add_html("")
         with self.server.gui.add_folder("Scene", expand_by_default=False):
             self.scene.create_scene_gui()
@@ -192,6 +200,58 @@ class LiveSpectator:
     @property
     def url(self) -> str:
         return f"http://{self.public_host}:{self.port}/?spectator_token={self.token}"
+
+    def _enable_fixed_geom_shadows(self) -> None:
+        fixed_geom_handles = getattr(self.scene, "_fixed_geom_handles", {})
+        for handle in fixed_geom_handles.values():
+            if hasattr(handle, "cast_shadow"):
+                handle.cast_shadow = True
+            if hasattr(handle, "receive_shadow"):
+                handle.receive_shadow = True
+
+    def _wrap_visual_rebuild_for_fixed_geom_shadows(self) -> None:
+        rebuild_visual_handles = getattr(self.scene, "rebuild_visual_handles", None)
+        if rebuild_visual_handles is None:
+            return
+
+        def rebuild_with_fixed_geom_shadows(*args: Any, **kwargs: Any) -> Any:
+            result = rebuild_visual_handles(*args, **kwargs)
+            self._enable_fixed_geom_shadows()
+            return result
+
+        self.scene.rebuild_visual_handles = rebuild_with_fixed_geom_shadows
+
+    def _configure_spectator_lighting(self) -> None:
+        self.server.scene.configure_default_lights(enabled=False)
+        self.server.scene.configure_environment_map("studio", environment_intensity=0.65)
+        self.server.scene.add_light_ambient("/lights/ambient", color=(255, 255, 255), intensity=0.25)
+        self.server.scene.add_light_hemisphere(
+            "/lights/hemisphere",
+            sky_color=(255, 255, 255),
+            ground_color=(170, 175, 180),
+            intensity=0.6,
+        )
+        self.server.scene.add_light_spot(
+            "/lights/key",
+            color=(255, 248, 235),
+            intensity=5.0,
+            distance=8.0,
+            angle=0.9,
+            penumbra=0.45,
+            decay=1.5,
+            cast_shadow=True,
+            position=(1.4, -2.2, 4.0),
+            direction=(-0.45, 0.55, -1.0),
+        )
+
+    def _disable_spectator_lod(self) -> None:
+        add_batched_meshes_trimesh = self.server.scene.add_batched_meshes_trimesh
+
+        def add_full_detail_batched_meshes_trimesh(*args: Any, **kwargs: Any) -> Any:
+            kwargs["lod"] = "off"
+            return add_batched_meshes_trimesh(*args, **kwargs)
+
+        self.server.scene.add_batched_meshes_trimesh = add_full_detail_batched_meshes_trimesh
 
     def _run(self) -> None:
         delay = 1.0 / max(1.0, self.update_hz)
@@ -918,6 +978,119 @@ def create_app(
         files = sorted(DEFAULT_RECORD_DIR.glob("*.h5"), key=lambda item: item.stat().st_mtime, reverse=True)
         return {"recordings": [str(path) for path in files]}
 
+    def spectator_path(path: str, query: str | None = None) -> str:
+        request_path = "/" + path.lstrip("/")
+        if query:
+            request_path += f"?{query}"
+        return request_path
+
+    async def proxy_spectator_http(request: Request, path: str) -> Response:
+        if spectator is None:
+            raise HTTPException(status_code=404, detail="spectator is disabled")
+        body = await request.body()
+        headers = {
+            name: value
+            for name, value in request.headers.items()
+            if name.lower() not in {"host", "connection", "content-length"}
+        }
+
+        def fetch() -> tuple[int, dict[str, str], bytes, str | None]:
+            conn = http.client.HTTPConnection(spectator.host, spectator.port, timeout=30)
+            try:
+                conn.request(
+                    request.method,
+                    spectator_path(path, request.url.query),
+                    body=body,
+                    headers=headers,
+                )
+                upstream = conn.getresponse()
+                response_body = upstream.read()
+                response_headers = {
+                    name: value
+                    for name, value in upstream.getheaders()
+                    if name.lower() not in {"connection", "content-length", "transfer-encoding"}
+                }
+                return upstream.status, response_headers, response_body, upstream.getheader("content-type")
+            finally:
+                conn.close()
+
+        status, response_headers, response_body, content_type = await asyncio.to_thread(fetch)
+        return Response(
+            content=response_body,
+            status_code=status,
+            headers=response_headers,
+            media_type=content_type,
+        )
+
+    async def proxy_spectator_websocket(websocket: WebSocket, path: str) -> None:
+        if spectator is None:
+            await websocket.close(code=1008)
+            return
+        requested_protocols = websocket.headers.get("sec-websocket-protocol", "")
+        protocols = [item.strip() for item in requested_protocols.split(",") if item.strip()]
+        selected_protocol = protocols[0] if protocols else None
+        await websocket.accept(subprotocol=selected_protocol)
+        upstream_url = f"ws://{spectator.host}:{spectator.port}{spectator_path(path, websocket.url.query)}"
+        try:
+            async with websockets.connect(
+                upstream_url,
+                subprotocols=protocols or None,
+                max_size=50 * 1024 * 1024,
+                compression=None,
+            ) as upstream:
+                async def client_to_upstream() -> None:
+                    while True:
+                        message = await websocket.receive()
+                        if message.get("type") == "websocket.disconnect":
+                            await upstream.close()
+                            return
+                        if "text" in message and message["text"] is not None:
+                            await upstream.send(message["text"])
+                        elif "bytes" in message and message["bytes"] is not None:
+                            await upstream.send(message["bytes"])
+
+                async def upstream_to_client() -> None:
+                    async for message in upstream:
+                        if isinstance(message, bytes):
+                            await websocket.send_bytes(message)
+                        else:
+                            await websocket.send_text(message)
+
+                done, pending = await asyncio.wait(
+                    {
+                        asyncio.create_task(client_to_upstream()),
+                        asyncio.create_task(upstream_to_client()),
+                    },
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                for task in done:
+                    task.result()
+        except (WebSocketDisconnect, websockets.ConnectionClosed):
+            pass
+        finally:
+            try:
+                await websocket.close()
+            except RuntimeError:
+                pass
+
+    @app.api_route("/", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
+    async def spectator_root(request: Request) -> Response:
+        return await proxy_spectator_http(request, "")
+
+    @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
+    async def spectator_asset(request: Request, path: str) -> Response:
+        return await proxy_spectator_http(request, path)
+
+    @app.websocket("/")
+    async def spectator_root_ws(websocket: WebSocket) -> None:
+        await proxy_spectator_websocket(websocket, "")
+
+    @app.websocket("/{path:path}")
+    async def spectator_asset_ws(websocket: WebSocket, path: str) -> None:
+        await proxy_spectator_websocket(websocket, path)
+
     return app
 
 
@@ -996,6 +1169,7 @@ def main() -> None:
             host=args.spectator_host,
             port=spectator_port,
             public_host=args.spectator_public_host,
+            token=os.environ.get("WORLD_SPECTATOR_TOKEN", "").strip() or None,
             update_hz=args.spectator_hz,
         )
     uvicorn.run(create_app(local_sim, api_doc_path=api_doc, spectator=spectator), host=args.host, port=args.port)

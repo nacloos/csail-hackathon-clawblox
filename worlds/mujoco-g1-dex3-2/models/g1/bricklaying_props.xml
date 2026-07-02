@@ -4,31 +4,35 @@
   <option noslip_iterations="5"> </option>
 
   <worldbody>
-    <body name="cube" pos="2 2 0.6">
-      <geom type="box" name="my_box" size="0.75 0.75 0.375"/>
+    <body name="second_table" pos="2 2 0">
+      <geom type="box" name="second_tabletop" size="0.75 0.75 0.03" pos="0 0 0.9" material="table"/>
+      <geom type="box" name="second_front_left_table_leg" size="0.035 0.035 0.435" pos="-0.68 -0.68 0.435" material="table"/>
+      <geom type="box" name="second_front_right_table_leg" size="0.035 0.035 0.435" pos="-0.68 0.68 0.435" material="table"/>
+      <geom type="box" name="second_back_left_table_leg" size="0.035 0.035 0.435" pos="0.68 -0.68 0.435" material="table"/>
+      <geom type="box" name="second_back_right_table_leg" size="0.035 0.035 0.435" pos="0.68 0.68 0.435" material="table"/>
     </body>
-    
-    <body name="brick_0" pos="-0.55 -0.48 1.5">
+
+    <body name="brick_0" pos="-0.8 -0.48 1.5">
       <joint name="brick_0_joint" type="free" limited="false" actuatorfrclimited="false" />
       <geom type="box" name="brick_0" size="0.045 0.1 0.03" rgba="1 0 0 1" mass="0.08" friction="2.0 0.5 0.01" solref="0.004 1" solimp="0.99 0.995 0.0001 0.5 2"/>
     </body>
     
-    <body name="brick_1" pos="-0.55 -0.24 1.5">
+    <body name="brick_1" pos="-0.8 -0.24 1.5">
       <joint name="brick_1_joint" type="free" limited="false" actuatorfrclimited="false" />
       <geom type="box" name="brick_1" size="0.045 0.1 0.03" rgba="1 0 0 1" mass="0.08" friction="2.0 0.5 0.01" solref="0.004 1" solimp="0.99 0.995 0.0001 0.5 2"/>
     </body>
     
-    <body name="brick_2" pos="-0.55 0 1.5">
+    <body name="brick_2" pos="-0.8 0 1.5">
       <joint name="brick_2_joint" type="free" limited="false" actuatorfrclimited="false" />
       <geom type="box" name="brick_2" size="0.045 0.1 0.03" rgba="1 0 0 1" mass="0.08" friction="2.0 0.5 0.01" solref="0.004 1" solimp="0.99 0.995 0.0001 0.5 2"/>
     </body>
     
-    <body name="brick_3" pos="-0.55 0.24 1.5">
+    <body name="brick_3" pos="-0.8 0.24 1.5">
       <joint name="brick_3_joint" type="free" limited="false" actuatorfrclimited="false" />
       <geom type="box" name="brick_3" size="0.045 0.1 0.03" rgba="1 0 0 1" mass="0.08" friction="2.0 0.5 0.01" solref="0.004 1" solimp="0.99 0.995 0.0001 0.5 2"/>
     </body>
     
-    <body name="brick_4" pos="-0.55 0.48 1.5">
+    <body name="brick_4" pos="-0.8 0.48 1.5">
       <joint name="brick_4_joint" type="free" limited="false" actuatorfrclimited="false" />
       <geom type="box" name="brick_4" size="0.045 0.1 0.03" rgba="1 0 0 1" mass="0.08" friction="2.0 0.5 0.01" solref="0.004 1" solimp="0.99 0.995 0.0001 0.5 2"/>
     </body>
