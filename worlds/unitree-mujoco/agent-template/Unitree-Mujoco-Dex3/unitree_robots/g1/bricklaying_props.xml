@@ -1,0 +1,37 @@
+<mujoco model="bricklaying_props">
+  <include file="table.xml"/>  
+  <compiler angle="radian" meshdir="meshes" />
+  <option noslip_iterations="5"> </option>
+
+  <worldbody>
+    <body name="cube" pos="2 2 0.6">
+      <geom type="box" name="my_box" size="0.75 0.75 0.375"/>
+    </body>
+    
+    <body name="brick_0" pos="1.3 1.5 1.5">
+      <joint name="brick_0_joint" type="free" limited="false" actuatorfrclimited="false" />
+      <geom type="box" name="brick_0" size="0.045 0.1 0.03" rgba="1 0 0 1" mass="0.005" friction="2.0 0.5 0.01"/>
+    </body>
+    
+    <body name="brick_1" pos="-0.7 0 1.5">
+      <joint name="brick_1_joint" type="free" limited="false" actuatorfrclimited="false" />
+      <geom type="box" name="brick_1" size="0.045 0.1 0.03" rgba="1 0 0 1" mass="0.005" friction="2.0 0.5 0.01"/>
+    </body>
+    
+    <body name="brick_2" pos="1.3 1.8 1.5">
+      <joint name="brick_2_joint" type="free" limited="false" actuatorfrclimited="false" />
+      <geom type="box" name="brick_2" size="0.045 0.1 0.03" rgba="1 0 0 1" mass="0.005" friction="2.0 0.5 0.01"/>
+    </body>
+    
+    <body name="brick_3" pos="1.3 2.1 1.5">
+      <joint name="brick_3_joint" type="free" limited="false" actuatorfrclimited="false" />
+      <geom type="box" name="brick_3" size="0.045 0.1 0.03" rgba="1 0 0 1" mass="0.005" friction="2.0 0.5 0.01"/>
+    </body>
+    
+    <body name="brick_4" pos="1.3 2.4 1.5">
+      <joint name="brick_4_joint" type="free" limited="false" actuatorfrclimited="false" />
+      <geom type="box" name="brick_4" size="0.045 0.1 0.03" rgba="1 0 0 1" mass="0.005" friction="2.0 0.5 0.01"/>
+    </body>
+    
+  </worldbody>
+</mujoco>

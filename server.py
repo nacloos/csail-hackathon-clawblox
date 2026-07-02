@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from collections import deque
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
+import importlib.util
+import json
+import os
 from pathlib import Path
 import threading
 import time
 from uuid import uuid4
 from typing import Any
+
+import numpy as np
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -16,17 +23,39 @@ from pydantic import BaseModel, Field
 import mujoco
 import uvicorn
 
-from dual_panda_scene import DUAL_SCENE, ensure_dual_panda_scene
-from mujoco_recording import RecordingConfig, RecordingWriter, timestamped_recording_path
-from panda_setup import find_panda_arms, set_panda_home
-
-
 ROOT = Path(__file__).resolve().parent
-SCENE = ROOT / "models" / "panda_cube" / "scene.xml"
+SCENE = ROOT / "worlds" / "mujoco-panda" / "models" / "panda_cube" / "scene.xml"
 API_DOC = ROOT / "API.md"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8080
+DEFAULT_SPECTATOR_PORT_OFFSET = 1000
 DEFAULT_RECORD_DIR = ROOT / "recordings"
+DUAL_SCENE_HELPER = ROOT / "worlds" / "mujoco-dual-panda" / "dual_panda_scene.py"
+DUAL_SCENE = ROOT / "worlds" / "mujoco-dual-panda" / "models" / "generated_scene.xml"
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid {name}={value!r}: expected integer") from exc
+
+
+def env_path(name: str, default: Path | None = None) -> Path | None:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    return Path(value)
 
 GEOM_TYPES = {
     int(mujoco.mjtGeom.mjGEOM_PLANE): "plane",
@@ -59,6 +88,33 @@ ACTUATOR_TRANSMISSION_TYPES = {
     int(mujoco.mjtTrn.mjTRN_BODY): "body",
 }
 
+from mujoco_recording import (
+    RecordingConfig,
+    RecordingWriter,
+    capture_state,
+    default_state_sig,
+    restore_state,
+    scene_hash,
+    timestamped_recording_path,
+)
+
+SNAPSHOT_FORMAT = "mujoco-state-v1"
+
+
+def ensure_dual_panda_scene(path: Path = DUAL_SCENE) -> Path:
+    spec = importlib.util.spec_from_file_location("mujoco_dual_panda_scene", DUAL_SCENE_HELPER)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load dual Panda scene helper: {DUAL_SCENE_HELPER}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.ensure_dual_panda_scene(path)
+
+
+@dataclass(frozen=True)
+class ControlGroup:
+    name: str
+    actuator_ids: tuple[int, ...]
+
 
 class InputAction(BaseModel):
     type: str
@@ -85,16 +141,90 @@ class Session:
         self.last_seen = self.created_at
 
 
+class LiveSpectator:
+    def __init__(
+        self,
+        sim: "SimState",
+        *,
+        host: str,
+        port: int,
+        public_host: str,
+        update_hz: float = 30.0,
+    ) -> None:
+        try:
+            import viser
+            from mjviser.scene import ViserMujocoScene
+        except ImportError as exc:
+            raise RuntimeError("live spectator requires the `mjviser` and `viser` packages") from exc
+
+        self.sim = sim
+        self.host = host
+        self.port = port
+        self.public_host = public_host
+        self.update_hz = update_hz
+        self.token = str(uuid4())
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.server = viser.ViserServer(host=host, port=port, label="MuJoCo spectator")
+        self.scene = ViserMujocoScene(self.server, sim.model, num_envs=1)
+        self.status = self.server.gui.add_html("")
+        with self.server.gui.add_folder("Scene", expand_by_default=False):
+            self.scene.create_scene_gui()
+        with self.server.gui.add_folder("Visualization", expand_by_default=False):
+            self.scene.create_overlay_gui()
+        with self.server.gui.add_folder("Groups", expand_by_default=False):
+            self.scene.create_groups_gui()
+
+    def start(self) -> None:
+        if self.thread is not None and self.thread.is_alive():
+            return
+        self.stop_event.clear()
+        self.thread = threading.Thread(target=self._run, name="mujoco-spectator", daemon=True)
+        self.thread.start()
+        print(f"Spectator frontend: {self.url}", flush=True)
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=2.0)
+        self.server.stop()
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.public_host}:{self.port}/?spectator_token={self.token}"
+
+    def _run(self) -> None:
+        delay = 1.0 / max(1.0, self.update_hz)
+        while not self.stop_event.is_set():
+            with self.sim.lock:
+                self.scene.update_from_mjdata(self.sim.data)
+                self.status.content = (
+                    "<div style='font-size:0.9em; line-height:1.35'>"
+                    "<strong>Status:</strong> Live<br/>"
+                    f"<strong>Tick:</strong> {self.sim.tick}<br/>"
+                    f"<strong>Time:</strong> {float(self.sim.data.time):.2f}s"
+                    "</div>"
+                )
+            time.sleep(delay)
+
+
 class SimState:
     def __init__(
         self,
         scene: Path,
         *,
+        control_groups: str = "single",
         record_path: Path | None = None,
         record_config: RecordingConfig | None = None,
+        resume_path: Path | None = None,
     ) -> None:
-        self.scene = scene
-        self.model = mujoco.MjModel.from_xml_path(str(scene))
+        if control_groups not in {"single", "prefix"}:
+            raise ValueError(f"unknown control grouping mode: {control_groups}")
+        self.scene = scene.resolve()
+        self.control_group_mode = control_groups
+        self.scene_hash = scene_hash(self.scene)
+        self.state_sig = default_state_sig()
+        self.model = mujoco.MjModel.from_xml_path(str(self.scene))
         self.data = mujoco.MjData(self.model)
         self.lock = threading.RLock()
         self.stop_event = threading.Event()
@@ -108,15 +238,19 @@ class SimState:
         self.actuator_names = self._names(mujoco.mjtObj.mjOBJ_ACTUATOR, self.model.nu)
         self.joint_names = self._names(mujoco.mjtObj.mjOBJ_JOINT, self.model.njnt)
         self.body_names = self._names(mujoco.mjtObj.mjOBJ_BODY, self.model.nbody)
-        self.arms = find_panda_arms(self.model)
-        self.arms_by_name = {arm.name: arm for arm in self.arms}
-        self.object_body_ids = [
-            body_id
-            for body_id, name in enumerate(self.body_names)
-            if name.startswith(("block_", "brick_", "plank_", "pillar_"))
-        ]
+        self.control_groups = self.find_control_groups_locked()
+        self.control_groups_by_name = {group.name: group for group in self.control_groups}
+        self.object_body_ids = self.find_object_body_ids_locked()
         self.sessions: dict[str, Session] = {}
         self.reset()
+        if resume_path is not None:
+            self.restore_snapshot(json.loads(Path(resume_path).read_text(encoding="utf-8")))
+            print(
+                f"Restored world state from snapshot: {resume_path} "
+                f"(tick={self.tick}, time={float(self.data.time):.3f}s, "
+                f"sessions={len(self.sessions)})",
+                flush=True,
+            )
         if record_path is not None:
             self.start_recording(record_path, record_config)
 
@@ -135,30 +269,29 @@ class SimState:
 
     def reset(self, session_id: str | None = None) -> dict[str, Any]:
         with self.lock:
-            mujoco.mj_resetData(self.model, self.data)
-            set_panda_home(self.model, self.data)
+            self.reset_to_default_locked()
             self.record_event_locked("Reset", {}, session_id)
             return self.observe_locked(session_id)
 
     def set_control(self, ctrl: list[float], session_id: str | None = None) -> dict[str, Any]:
         with self.lock:
-            if len(self.arms) > 1:
+            if len(self.control_groups) > 1:
                 if not session_id:
-                    raise HTTPException(status_code=401, detail="SetControl requires X-Session in multi-robot worlds")
+                    raise HTTPException(status_code=401, detail="SetControl requires X-Session in multi-controller worlds")
                 session = self.sessions.get(session_id)
                 if session is None:
                     raise HTTPException(status_code=401, detail="unknown session")
                 if session.robot is None:
-                    raise HTTPException(status_code=403, detail="session has no assigned robot")
-                arm = self.arms_by_name[session.robot]
-                if len(ctrl) != len(arm.actuator_ids):
+                    raise HTTPException(status_code=403, detail="session has no assigned controller")
+                group = self.control_groups_by_name[session.robot]
+                if len(ctrl) != len(group.actuator_ids):
                     raise HTTPException(
                         status_code=400,
-                        detail=f"ctrl length must be {len(arm.actuator_ids)} for your assigned robot",
+                        detail=f"ctrl length must be {len(group.actuator_ids)} for your assigned controller",
                     )
-                for actuator_id, value in zip(arm.actuator_ids, ctrl, strict=True):
+                for actuator_id, value in zip(group.actuator_ids, ctrl, strict=True):
                     self.data.ctrl[actuator_id] = value
-                self.record_event_locked("SetControl", {"robot": arm.name, "ctrl": ctrl}, session_id)
+                self.record_event_locked("SetControl", {"robot": group.name, "ctrl": ctrl}, session_id)
                 return self.observe_locked(session_id)
 
             if len(ctrl) != self.model.nu:
@@ -216,9 +349,14 @@ class SimState:
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
+            state = capture_state(self.model, self.data, self.state_sig)
             return {
+                "format": SNAPSHOT_FORMAT,
+                "scene_hash": self.scene_hash,
                 "tick": self.tick,
                 "time": float(self.data.time),
+                "state_sig": int(self.state_sig),
+                "state_b64": base64.b64encode(state.tobytes()).decode("ascii"),
                 "qpos": self.data.qpos.tolist(),
                 "qvel": self.data.qvel.tolist(),
                 "ctrl": self.data.ctrl.tolist(),
@@ -238,6 +376,47 @@ class SimState:
                     "messages": list(self.chat_messages),
                 },
             }
+
+    def restore_snapshot(self, doc: dict[str, Any]) -> None:
+        if doc.get("format") != SNAPSHOT_FORMAT:
+            raise SystemExit(
+                f"snapshot format {doc.get('format')!r} is not {SNAPSHOT_FORMAT!r}"
+            )
+        if doc.get("scene_hash") != self.scene_hash:
+            raise SystemExit(
+                "snapshot scene_hash does not match the loaded scene; "
+                "restoring into a different scene is not supported"
+            )
+        if int(doc.get("state_sig", -1)) != int(self.state_sig):
+            raise SystemExit(
+                f"snapshot state_sig {doc.get('state_sig')} does not match {int(self.state_sig)}"
+            )
+        state = np.frombuffer(base64.b64decode(doc["state_b64"]), dtype=np.float64)
+        expected = mujoco.mj_stateSize(self.model, self.state_sig)
+        if state.size != expected:
+            raise SystemExit(
+                f"snapshot state has {state.size} values, expected {expected}"
+            )
+        with self.lock:
+            restore_state(self.model, self.data, state, self.state_sig)
+            self.tick = int(doc.get("tick", 0))
+            self.sessions = {}
+            for entry in doc.get("sessions", []):
+                session = Session(
+                    entry.get("name", "agent"),
+                    entry.get("session"),
+                    entry.get("robot"),
+                )
+                if entry.get("agent_id"):
+                    session.agent_id = entry["agent_id"]
+                if entry.get("created_at") is not None:
+                    session.created_at = float(entry["created_at"])
+                if entry.get("last_seen") is not None:
+                    session.last_seen = float(entry["last_seen"])
+                self.sessions[session.session_id] = session
+            chat = doc.get("chat", {})
+            self.chat_next_seq = int(chat.get("next_seq", 0))
+            self.chat_messages = deque(chat.get("messages", []), maxlen=1000)
 
     def start_recording(
         self,
@@ -488,7 +667,7 @@ class SimState:
                 "ctrl": [float(self.data.ctrl[actuator_id]) for actuator_id in arm.actuator_ids],
                 "assigned": any(session.robot == arm.name for session in self.sessions.values()),
             }
-            for arm in self.arms
+            for arm in self.control_groups
         ]
 
     def session_payload(self, session: Session) -> dict[str, Any]:
@@ -498,8 +677,8 @@ class SimState:
             "name": session.name,
             "robot": session.robot,
         }
-        if session.robot and session.robot in self.arms_by_name:
-            payload["control_indices"] = list(self.arms_by_name[session.robot].actuator_ids)
+        if session.robot and session.robot in self.control_groups_by_name:
+            payload["control_indices"] = list(self.control_groups_by_name[session.robot].actuator_ids)
         return payload
 
     def actuator_target_name(self, trn_type: str, trn_ids: list[int]) -> dict[str, Any] | None:
@@ -528,13 +707,13 @@ class SimState:
 
     def next_available_robot_locked(self) -> str | None:
         assigned = {session.robot for session in self.sessions.values()}
-        for arm in self.arms:
-            if arm.name not in assigned:
-                return arm.name
-        if len(self.arms) == 1:
-            return self.arms[0].name
-        if self.arms:
-            raise HTTPException(status_code=409, detail="all robots already have assigned sessions")
+        for group in self.control_groups:
+            if group.name not in assigned:
+                return group.name
+        if len(self.control_groups) == 1:
+            return self.control_groups[0].name
+        if self.control_groups:
+            raise HTTPException(status_code=409, detail="all controllers already have assigned sessions")
         return None
 
     def record_event_locked(
@@ -591,15 +770,68 @@ class SimState:
             names.append(name or f"{obj_type.name.lower()}_{obj_id}")
         return names
 
+    def find_object_body_ids_locked(self) -> list[int]:
+        object_body_ids: list[int] = []
+        free_joint_type = int(mujoco.mjtJoint.mjJNT_FREE)
+        for body_id in range(1, self.model.nbody):
+            joint_start = int(self.model.body_jntadr[body_id])
+            joint_count = int(self.model.body_jntnum[body_id])
+            geom_count = int(self.model.body_geomnum[body_id])
+            if geom_count <= 0:
+                continue
+            joint_ids = range(joint_start, joint_start + joint_count)
+            if any(int(self.model.jnt_type[joint_id]) == free_joint_type for joint_id in joint_ids):
+                object_body_ids.append(body_id)
+        return object_body_ids
 
-def create_app(sim: SimState, manage_sim: bool = True) -> FastAPI:
+    def reset_to_default_locked(self) -> None:
+        key_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_KEY, "home")
+        if key_id >= 0:
+            mujoco.mj_resetDataKeyframe(self.model, self.data, key_id)
+        else:
+            mujoco.mj_resetData(self.model, self.data)
+        mujoco.mj_forward(self.model, self.data)
+
+    def find_control_groups_locked(self) -> list[ControlGroup]:
+        if self.model.nu == 0:
+            return []
+        if self.control_group_mode == "single":
+            return [ControlGroup("robot", tuple(range(self.model.nu)))]
+
+        prefixed: dict[str, list[int]] = {}
+        unprefixed: list[int] = []
+        for actuator_id, name in enumerate(self.actuator_names):
+            prefix, sep, suffix = name.partition("_")
+            if sep and prefix and suffix:
+                prefixed.setdefault(prefix, []).append(actuator_id)
+            else:
+                unprefixed.append(actuator_id)
+
+        if len(prefixed) >= 2 and not unprefixed:
+            return [
+                ControlGroup(name, tuple(actuator_ids))
+                for name, actuator_ids in sorted(prefixed.items())
+            ]
+        return [ControlGroup("robot", tuple(range(self.model.nu)))]
+
+
+def create_app(
+    sim: SimState,
+    manage_sim: bool = True,
+    api_doc_path: Path = API_DOC,
+    spectator: LiveSpectator | None = None,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if manage_sim:
             sim.start()
+        if spectator is not None:
+            spectator.start()
         try:
             yield
         finally:
+            if spectator is not None:
+                spectator.stop()
             if manage_sim:
                 sim.stop()
 
@@ -607,7 +839,7 @@ def create_app(sim: SimState, manage_sim: bool = True) -> FastAPI:
     async def noop_lifespan(app: FastAPI):
         yield
 
-    app = FastAPI(title="MuJoCo Panda API", lifespan=lifespan if manage_sim else noop_lifespan)
+    app = FastAPI(title="MuJoCo API", lifespan=lifespan if manage_sim else noop_lifespan)
 
     @app.post("/join")
     def join(name: str = "agent", x_session: str | None = Header(default=None)) -> dict[str, Any]:
@@ -645,21 +877,25 @@ def create_app(sim: SimState, manage_sim: bool = True) -> FastAPI:
 
     @app.get("/api.md", response_class=PlainTextResponse)
     def api_doc() -> str:
-        return API_DOC.read_text()
+        return api_doc_path.read_text()
 
     @app.get("/skill.md", response_class=PlainTextResponse)
     def skill_doc() -> str:
-        return API_DOC.read_text()
+        return api_doc_path.read_text()
+
+    operator_token = os.environ.get("WORLD_OPERATOR_TOKEN", "").strip()
 
     @app.get("/snapshot")
-    def snapshot() -> dict[str, Any]:
+    def snapshot(x_operator_token: str | None = Header(default=None)) -> dict[str, Any]:
+        if operator_token and x_operator_token != operator_token:
+            raise HTTPException(status_code=401, detail="snapshot requires X-Operator-Token")
         return sim.snapshot()
 
     @app.post("/record/start")
     def record_start(request: RecordStart) -> dict[str, Any]:
         path = Path(request.path) if request.path else timestamped_recording_path(DEFAULT_RECORD_DIR)
         if not path.is_absolute():
-            path = ROOT / path
+            path = Path.cwd() / path
         return sim.start_recording(
             path,
             RecordingConfig(
@@ -690,30 +926,79 @@ app = create_app(sim)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the MuJoCo Panda API server.")
-    parser.add_argument("--host", default=DEFAULT_HOST)
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser = argparse.ArgumentParser(description="Run the MuJoCo API server.")
+    parser.add_argument("--host", default=os.environ.get("WORLD_HOST", DEFAULT_HOST))
+    parser.add_argument("--port", type=int, default=env_int("WORLD_PORT", DEFAULT_PORT))
     parser.add_argument("--scene", type=Path, default=SCENE)
+    parser.add_argument("--api-doc", type=Path)
+    parser.add_argument("--no-spectator", action="store_true", help="Disable the live browser spectator.")
+    parser.add_argument("--spectator-host", default=DEFAULT_HOST)
+    parser.add_argument("--spectator-public-host", default=DEFAULT_HOST)
+    parser.add_argument("--spectator-port", type=int)
+    parser.add_argument("--spectator-hz", type=float, default=30.0)
     parser.add_argument("--dual-panda", action="store_true", help="Run one shared world with left/right Panda arms.")
-    parser.add_argument("--record", action="store_true", help="Record the session to HDF5.")
-    parser.add_argument("--record-dir", type=Path, default=DEFAULT_RECORD_DIR)
+    parser.add_argument(
+        "--control-groups",
+        choices=("single", "prefix"),
+        default=os.environ.get("WORLD_CONTROL_GROUPS", "single"),
+        help=(
+            "How to expose actuators to agent sessions. 'single' exposes one whole-robot "
+            "controller; 'prefix' groups actuators by the name prefix before the first underscore."
+        ),
+    )
+    parser.add_argument(
+        "--record",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("WORLD_RECORD", False),
+        help="Record the session to HDF5.",
+    )
+    parser.add_argument("--record-dir", type=Path, default=env_path("WORLD_RECORD_DIR", DEFAULT_RECORD_DIR))
     parser.add_argument("--record-path", type=Path)
     parser.add_argument("--preview-hz", type=float, default=30.0)
     parser.add_argument("--checkpoint-seconds", type=float, default=1.0)
+    parser.add_argument(
+        "--resume",
+        type=Path,
+        default=env_path("WORLD_RESUME_PATH"),
+        help="Restore full world state from a snapshot file before serving.",
+    )
     args = parser.parse_args()
+    api_doc = args.api_doc or (Path.cwd() / "API.md" if (Path.cwd() / "API.md").exists() else API_DOC)
+    if not api_doc.is_absolute():
+        api_doc = Path.cwd() / api_doc
     record_path = None
     if args.record:
-        record_path = args.record_path or timestamped_recording_path(args.record_dir)
+        record_dir = args.record_dir if args.record_dir.is_absolute() else Path.cwd() / args.record_dir
+        record_path = args.record_path or timestamped_recording_path(record_dir)
+        if not record_path.is_absolute():
+            record_path = Path.cwd() / record_path
     scene = ensure_dual_panda_scene(DUAL_SCENE) if args.dual_panda else args.scene
+    if not scene.is_absolute():
+        scene = Path.cwd() / scene
+    resume_path = args.resume
+    if resume_path is not None and not resume_path.is_absolute():
+        resume_path = Path.cwd() / resume_path
     local_sim = SimState(
         scene,
+        control_groups=args.control_groups,
         record_path=record_path,
         record_config=RecordingConfig(
             preview_hz=args.preview_hz,
             checkpoint_seconds=args.checkpoint_seconds,
         ),
+        resume_path=resume_path,
     )
-    uvicorn.run(create_app(local_sim), host=args.host, port=args.port)
+    spectator = None
+    if not args.no_spectator:
+        spectator_port = args.spectator_port or (args.port + DEFAULT_SPECTATOR_PORT_OFFSET)
+        spectator = LiveSpectator(
+            local_sim,
+            host=args.spectator_host,
+            port=spectator_port,
+            public_host=args.spectator_public_host,
+            update_hz=args.spectator_hz,
+        )
+    uvicorn.run(create_app(local_sim, api_doc_path=api_doc, spectator=spectator), host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

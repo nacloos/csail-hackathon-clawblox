@@ -45,6 +45,7 @@ WORLD_SESSION_FIELD="${WORLD_SESSION_FIELD-session}"
 WORLD_SESSION_HEADER="${WORLD_SESSION_HEADER-X-Session}"
 WORLD_SESSION_FILE="${WORLD_SESSION_FILE-}"
 WORLD_AGENT_NAME="${WORLD_AGENT_NAME-}"
+WORLD_SOURCE_DIR="${WORLD_SOURCE_DIR-}"
 WORKSPACE_DIR="${WORKSPACE_DIR-}"
 AGENT_DIR="${AGENT_DIR-}"
 SESSION_ID_FILE="${SESSION_ID_FILE-}"
@@ -316,6 +317,21 @@ if [[ -d "$TEMPLATE_DIR" ]]; then
     dest="$WORKSPACE_DIR/$(basename "$entry")"
     if [[ ! -e "$dest" ]]; then
       cp -r "$entry" "$dest"
+    fi
+  done
+fi
+if [[ -n "$WORLD_SOURCE_DIR" && -d "$WORLD_SOURCE_DIR" ]]; then
+  world_workspace="$WORKSPACE_DIR/world"
+  mkdir -p "$world_workspace"
+  for entry in "$WORLD_SOURCE_DIR"/* "$WORLD_SOURCE_DIR"/.[!.]* "$WORLD_SOURCE_DIR"/..?*; do
+    [[ -e "$entry" ]] || continue
+    entry_name="$(basename "$entry")"
+    if [[ "$entry_name" == "results" ]]; then
+      continue
+    fi
+    dest="$world_workspace/$entry_name"
+    if [[ ! -e "$dest" ]]; then
+      cp -R "$entry" "$dest"
     fi
   done
 fi

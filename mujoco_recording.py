@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,7 @@ import mujoco
 import numpy as np
 
 
+ROOT = Path(__file__).resolve().parent
 SCHEMA_VERSION = 1
 STATE_DTYPE = np.float64
 PREVIEW_DTYPE = np.float32
@@ -53,6 +55,40 @@ def restore_state(
 def timestamped_recording_path(record_dir: Path) -> Path:
     stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
     return record_dir / f"{stamp}.h5"
+
+
+def register_recording_with_clawblox_manifest(recording_path: Path) -> None:
+    manifest_env = os.environ.get("CLAWBLOX_MANIFEST_PATH", "").strip()
+    if not manifest_env:
+        return
+
+    manifest_path = Path(manifest_env)
+    state_root = manifest_path.parent.parent
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        manifest = {"schema_version": 1}
+    except json.JSONDecodeError:
+        return
+
+    def path_value(path: Path) -> str:
+        try:
+            return str(path.resolve().relative_to(state_root.resolve()))
+        except ValueError:
+            return str(path)
+
+    recording = {
+        "path": path_value(recording_path),
+        "events": path_value(recording_path.with_suffix(".events.jsonl")),
+        "format": "mujoco-h5",
+    }
+    recordings = manifest.setdefault("recordings", [])
+    if not any(item.get("path") == recording["path"] for item in recordings):
+        recordings.append(recording)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = manifest_path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(manifest_path)
 
 
 @dataclass(frozen=True)
@@ -110,6 +146,7 @@ class RecordingWriter:
         self.events_file = self.events_path.open("a", encoding="utf-8")
         self._write_attrs(model)
         self._create_datasets(model)
+        register_recording_with_clawblox_manifest(path)
 
     def record_initial(self, tick: int, model: mujoco.MjModel, data: mujoco.MjData) -> None:
         self.record_step(tick, model, data, force=True)

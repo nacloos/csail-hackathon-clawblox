@@ -1,0 +1,17 @@
+services:
+  g1-bricklaying:
+    image: g1-bricklaying
+    container_name: g1-bricklaying
+    network_mode: host  # route ip connections 
+    stdin_open: true    # -i
+    tty: true           # -t
+    volumes:            # mount this repo
+      - .:/ws/g1-bricklaying
+    command: bash -c "pip install -e g1-bricklaying && tail -f /dev/null"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

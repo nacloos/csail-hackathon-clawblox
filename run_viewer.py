@@ -4,17 +4,25 @@ import time
 import mujoco
 import mujoco.viewer
 
-from panda_setup import set_panda_home
-
 
 ROOT = Path(__file__).resolve().parent
-SCENE = ROOT / "models" / "panda_cube" / "scene.xml"
+PANDA_WORLD = ROOT / "worlds" / "mujoco-panda"
+SCENE = PANDA_WORLD / "models" / "panda_cube" / "scene.xml"
+
+
+def reset_to_default(model: mujoco.MjModel, data: mujoco.MjData) -> None:
+    key_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "home")
+    if key_id >= 0:
+        mujoco.mj_resetDataKeyframe(model, data, key_id)
+    else:
+        mujoco.mj_resetData(model, data)
+    mujoco.mj_forward(model, data)
 
 
 def main() -> None:
     model = mujoco.MjModel.from_xml_path(str(SCENE))
     data = mujoco.MjData(model)
-    set_panda_home(model, data)
+    reset_to_default(model, data)
 
     with mujoco.viewer.launch_passive(model, data) as viewer:
         while viewer.is_running():

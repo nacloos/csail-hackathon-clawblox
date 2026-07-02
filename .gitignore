@@ -2,10 +2,12 @@ __pycache__/
 .venv/
 *.pyc
 MUJOCO_LOG.TXT
+cdds.LOG
 .env
 .env.*
 !.env.example
 runs/
+*.pt
 
 # OS / editor
 **/.DS_Store
@@ -24,3 +26,10 @@ assets/robo.mov
 .codex
 .clawblox-multi/
 worlds/*/results/
+
+# local Unitree checkouts/dependencies and scratch diagnostics
+worlds/unitree-mujoco/.deps/
+worlds/unitree-mujoco/G1-Bricklaying-Simulation/
+worlds/unitree-mujoco/Unitree-Mujoco-Dex3/
+worlds/unitree-mujoco/**/*egg-info/
+worlds/unitree-mujoco/_tmp_*_diag.py

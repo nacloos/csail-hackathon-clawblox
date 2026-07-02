@@ -1,0 +1,24 @@
+name = "MuJoCo Panda"
+description = "Franka Panda MuJoCo construction world."
+
+[runtime]
+mode = "external"
+
+[run]
+command = [
+  "uv", "run", "--project", "../..",
+  "python", "../../server.py",
+  "--scene", "models/panda_cube/scene.xml",
+  "--control-groups", "single",
+]
+
+[replay]
+command = [
+  "uv", "run", "--project", "../..",
+  "python", "../../replay.py",
+  "{recording}",
+  "--port", "{port}",
+]
+
+[agent]
+source_workspace = true

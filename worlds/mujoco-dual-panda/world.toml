@@ -1,0 +1,25 @@
+name = "MuJoCo Dual Panda"
+description = "Two Franka Panda arms sharing one MuJoCo construction world."
+
+[runtime]
+mode = "external"
+
+[run]
+command = [
+  "uv", "run", "--project", "../..",
+  "python", "../../server.py",
+  "--scene", "models/generated_scene.xml",
+  "--control-groups", "prefix",
+]
+
+[replay]
+command = [
+  "uv", "run", "--project", "../..",
+  "python", "../../replay.py",
+  "{recording}",
+  "--port", "{port}",
+]
+
+
+[agent]
+source_workspace = true

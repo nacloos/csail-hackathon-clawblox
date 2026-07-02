@@ -60,7 +60,8 @@ CLAWBLOX_CLAUDE_CODE_VERSION_PIN="${CLAWBLOX_CLAUDE_CODE_VERSION_PIN:-2.1.116}"
 SANDBOX="${SANDBOX:-0}"
 SKIP_SOUL="${SKIP_SOUL:-0}"
 WORLD_CAPABILITY_PROXY="${WORLD_CAPABILITY_PROXY:-auto}"
-WORLD_SERVER_CMD="${WORLD_SERVER_CMD:-uv run --with mujoco --with fastapi --with uvicorn python server.py}"
+WORLD_SERVER_CMD="${WORLD_SERVER_CMD:-}"
+WORLD_SERVER_CWD=""
 CLAUDE_FAILURE_IDLE_GRACE_SECONDS="${CLAUDE_FAILURE_IDLE_GRACE_SECONDS:-180}"
 CLAUDE_FAILURE_STALL_GRACE_SECONDS="${CLAUDE_FAILURE_STALL_GRACE_SECONDS:-300}"
 CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS="${CLAUDE_FAILURE_RESTART_BACKOFF_SECONDS:-5}"
@@ -183,6 +184,7 @@ write_agent_pane_command() {
   local startup_env_prefix="${21}"
   local claude_bin="${22}"
   local claude_code_version_pin="${23}"
+  local world_source_dir="${24}"
 
   cat >"$target" <<EOF
 #!/usr/bin/env bash
@@ -226,7 +228,7 @@ load_claude_code_oauth_token_env() {
 load_claude_code_oauth_token_env
 EOF
   cat >>"$target" <<EOF
-${auth_env_prefix}WORLD_BASE_URL=$(printf '%q' "$world_url") WORLD_INTERNAL_BASE_URL=$(printf '%q' "$world_internal_url") WORLD_AGENT_NAME=$(printf '%q' "$agent_display_name") AGENT_DIR=$(printf '%q' "$agent_dir") WORKSPACE_DIR=$(printf '%q' "$agent_workspace") SESSION_ID_FILE=$(printf '%q' "$session_id_file") WORLD_SESSION_FILE=$(printf '%q' "$world_session_file") RESET_EVERY=$(printf '%q' "$reset_every_seconds") DURATION_SECONDS=$(printf '%q' "$duration_seconds") CHECKPOINT_WARNING_SECONDS=$(printf '%q' "$checkpoint_warning_seconds") CHECKPOINT_WARNING_PROMPT=$(printf '%q' "$checkpoint_warning_prompt") CLAUDE_MODEL=$(printf '%q' "$claude_model") CLAUDE_PERMISSION_MODE=$(printf '%q' "$claude_permission_mode") CLAUDE_BARE=$(printf '%q' "$claude_bare") CLAUDE_EXTRA_ARGS=$(printf '%q' "$claude_extra_args") CLAWBLOX_CLAUDE_BIN=$(printf '%q' "$claude_bin") CLAWBLOX_CLAUDE_CODE_VERSION_PIN=$(printf '%q' "$claude_code_version_pin") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}bash $(printf '%q' "$AGENT_SCRIPT")
+${auth_env_prefix}WORLD_BASE_URL=$(printf '%q' "$world_url") WORLD_INTERNAL_BASE_URL=$(printf '%q' "$world_internal_url") WORLD_AGENT_NAME=$(printf '%q' "$agent_display_name") WORLD_SOURCE_DIR=$(printf '%q' "$world_source_dir") AGENT_DIR=$(printf '%q' "$agent_dir") WORKSPACE_DIR=$(printf '%q' "$agent_workspace") SESSION_ID_FILE=$(printf '%q' "$session_id_file") WORLD_SESSION_FILE=$(printf '%q' "$world_session_file") RESET_EVERY=$(printf '%q' "$reset_every_seconds") DURATION_SECONDS=$(printf '%q' "$duration_seconds") CHECKPOINT_WARNING_SECONDS=$(printf '%q' "$checkpoint_warning_seconds") CHECKPOINT_WARNING_PROMPT=$(printf '%q' "$checkpoint_warning_prompt") CLAUDE_MODEL=$(printf '%q' "$claude_model") CLAUDE_PERMISSION_MODE=$(printf '%q' "$claude_permission_mode") CLAUDE_BARE=$(printf '%q' "$claude_bare") CLAUDE_EXTRA_ARGS=$(printf '%q' "$claude_extra_args") CLAWBLOX_CLAUDE_BIN=$(printf '%q' "$claude_bin") CLAWBLOX_CLAUDE_CODE_VERSION_PIN=$(printf '%q' "$claude_code_version_pin") ${sandbox_env_prefix}${template_env_prefix}${startup_env_prefix}bash $(printf '%q' "$AGENT_SCRIPT")
 EOF
   chmod +x "$target"
 }
@@ -368,6 +370,7 @@ RUN_SAFE_ID=$(printf '%q' "$RUN_SAFE_ID")
 RUN_DIR=$(printf '%q' "$RUN_DIR")
 WORLDS_ROOT=$(printf '%q' "$WORLDS_ROOT")
 WORLD_ABS_DIR=$(printf '%q' "$WORLD_ABS_DIR")
+WORLD_SERVER_CWD=$(printf '%q' "$WORLD_SERVER_CWD")
 NUM_WORLDS=$(printf '%q' "$NUM_WORLDS")
 AGENTS_PER_WORLD=$(printf '%q' "$AGENTS_PER_WORLD")
 BASE_PORT=$(printf '%q' "$BASE_PORT")
@@ -418,6 +421,7 @@ write_run_config() {
   SANDBOX="$SANDBOX" \
   SKIP_SOUL="$SKIP_SOUL" \
   WORLD_CAPABILITY_PROXY="$WORLD_CAPABILITY_PROXY" \
+  WORLD_SERVER_CWD="$WORLD_SERVER_CWD" \
   SYSTEM_PROMPT_TEMPLATE="${SYSTEM_PROMPT_TEMPLATE:-}" \
   AGENT_NAME_PREFIX="$AGENT_NAME_PREFIX" \
   AGENT_TEMPLATE_DIRS_JOINED="$agent_template_dirs_joined" \
@@ -478,6 +482,7 @@ config = {
         "stop_grace_seconds": os.environ["STOP_GRACE_SECONDS"],
         "port_wait_seconds": os.environ["PORT_WAIT_SECONDS"],
         "world_server_cmd": os.environ["WORLD_SERVER_CMD"],
+        "world_server_cwd": os.environ["WORLD_SERVER_CWD"],
     },
 }
 
@@ -586,10 +591,23 @@ extract_spectator_token_from_log() {
   sed -n 's|^Spectator frontend: .*spectator_token=\([A-Za-z0-9-][A-Za-z0-9-]*\)$|\1|p' "$world_log" | tail -n 1
 }
 
+extract_spectator_frontend_from_log() {
+  local world_log="$1"
+  [[ -f "$world_log" ]] || return 1
+  sed -n 's|^Spectator frontend: \(.*\)$|\1|p' "$world_log" | tail -n 1
+}
+
 extract_spectator_token_from_tmux_pane() {
   local world_index="$1"
   tmux capture-pane -J -p -S -2000 -t "${TMUX_SESSION}:world-${world_index}" 2>/dev/null \
     | sed -n 's|^Spectator frontend: .*spectator_token=\([A-Za-z0-9-][A-Za-z0-9-]*\)$|\1|p' \
+    | tail -n 1
+}
+
+extract_spectator_frontend_from_tmux_pane() {
+  local world_index="$1"
+  tmux capture-pane -J -p -S -2000 -t "${TMUX_SESSION}:world-${world_index}" 2>/dev/null \
+    | sed -n 's|^Spectator frontend: \(.*\)$|\1|p' \
     | tail -n 1
 }
 
@@ -616,6 +634,17 @@ load_world_spectator_token() {
   fi
   cache_world_spectator_token "$world_index" >/dev/null 2>&1 || return 1
   tr -d '[:space:]' <"$token_file"
+}
+
+load_world_spectator_frontend() {
+  local world_index="$1"
+  local url
+  url="$(extract_spectator_frontend_from_log "$(world_log_for_index "$world_index")")" || true
+  if [[ -z "$url" ]]; then
+    url="$(extract_spectator_frontend_from_tmux_pane "$world_index")" || return 1
+  fi
+  [[ -n "$url" ]] || return 1
+  printf '%s\n' "$url"
 }
 
 save_world_snapshot() {
@@ -681,6 +710,25 @@ require_value() {
     usage
     exit 1
   fi
+}
+
+read_world_run_command() {
+  local world_dir="$1"
+  local world_toml="$world_dir/world.toml"
+  [[ -f "$world_toml" ]] || return 1
+  (cd "$ROOT_DIR" && uv run python - "$world_toml") <<'PY'
+import shlex
+import sys
+import tomllib
+
+path = sys.argv[1]
+with open(path, "rb") as f:
+    config = tomllib.load(f)
+command = config.get("run", {}).get("command")
+if not isinstance(command, list) or not command or not all(isinstance(item, str) and item for item in command):
+    raise SystemExit(1)
+print(shlex.join(command))
+PY
 }
 
 is_nonnegative_int() { [[ "$1" =~ ^[0-9]+$ ]]; }
@@ -1066,6 +1114,18 @@ if [[ ! -d "$WORLD_ABS_DIR" ]]; then
   exit 1
 fi
 
+if ((CLI_WORLD_SERVER_CMD == 0)); then
+  if WORLD_TOML_CMD="$(read_world_run_command "$WORLD_ABS_DIR")"; then
+    WORLD_SERVER_CMD="$WORLD_TOML_CMD"
+    WORLD_SERVER_CWD="$WORLD_ABS_DIR"
+  else
+    WORLD_SERVER_CMD="uv run --with mujoco --with fastapi --with uvicorn python server.py"
+    WORLD_SERVER_CWD="$ROOT_DIR"
+  fi
+else
+  WORLD_SERVER_CWD="$ROOT_DIR"
+fi
+
 TEMPLATE_ABS_DIR="$TEMPLATE_DIR"
 if [[ "$TEMPLATE_ABS_DIR" != /* ]]; then
   TEMPLATE_ABS_DIR="$ROOT_DIR/$TEMPLATE_ABS_DIR"
@@ -1185,13 +1245,15 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
   if [[ -n "$RESUME_PATH" ]]; then
     world_resume_arg="--resume '$world_resume_file' "
   fi
+  world_server_cwd_q="$(printf '%q' "$WORLD_SERVER_CWD")"
+  world_log_q="$(printf '%q' "$world_log")"
+  world_record_dir_q="$(printf '%q' "$world_record_dir")"
+  world_command="cd $world_server_cwd_q && $WORLD_SERVER_CMD --port $port"
   if [[ "$RECORD" == "true" ]]; then
-    tmux send-keys -t "${TMUX_SESSION}:world-$i" \
-      "cd '$ROOT_DIR' && $WORLD_SERVER_CMD --port $port 2>&1 | tee -a '$world_log'" Enter
-  else
-    tmux send-keys -t "${TMUX_SESSION}:world-$i" \
-      "cd '$ROOT_DIR' && $WORLD_SERVER_CMD --port $port 2>&1 | tee -a '$world_log'" Enter
+    world_command+=" --record --record-dir $world_record_dir_q"
   fi
+  world_command+=" 2>&1 | tee -a $world_log_q"
+  tmux send-keys -t "${TMUX_SESSION}:world-$i" "$world_command" Enter
 done
 
 echo "Waiting for servers to become healthy..."
@@ -1201,6 +1263,9 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
   if wait_for_server "$port"; then
     cache_world_spectator_token "$i" >/dev/null 2>&1 || true
     echo "ready"
+    if spectator_url="$(load_world_spectator_frontend "$i" 2>/dev/null)"; then
+      echo "  spectator: $spectator_url"
+    fi
     append_launcher_audit "world_ready" "world_index=$i port=$port"
   else
     echo "TIMEOUT (${HEALTH_TIMEOUT}s)"
@@ -1324,7 +1389,8 @@ for ((i = 0; i < NUM_WORLDS; i++)); do
       "$template_env_prefix" \
       "$startup_env_prefix" \
       "$CLAWBLOX_CLAUDE_BIN" \
-      "$CLAWBLOX_CLAUDE_CODE_VERSION_PIN"
+      "$CLAWBLOX_CLAUDE_CODE_VERSION_PIN" \
+      "$WORLD_ABS_DIR"
     printf '%s\n' "$pane_target" >"$agent_runtime_dir/pane_id.txt"
     printf '%s\n' "$pane_command_file" >"$agent_runtime_dir/pane_command_file.txt"
 
