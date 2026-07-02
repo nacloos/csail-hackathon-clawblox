@@ -121,9 +121,11 @@ class G1DDSWorld:
         self._setup_dds()
         next_step = time.perf_counter()
         while not self.stop_event.is_set():
-            samples = self._reader.take(N=16)
-            if samples:
-                self.latest_cmd = samples[-1]
+            # take() also yields InvalidSample notifications (e.g. a controller
+            # disposing/unregistering on exit); keep only real LowCmd_ data.
+            for sample in self._reader.take(N=16):
+                if isinstance(sample, LowCmd_):
+                    self.latest_cmd = sample
             with self.lock:
                 self._apply_control_locked()
                 mujoco.mj_step(self.model, self.data)
