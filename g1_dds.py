@@ -65,12 +65,28 @@ class G1DdsBridge:
         from cyclonedds.sub import DataReader
 
         self._LowCmd_ = LowCmd_
-        self._LowState_ = LowState_
-        self._MotorState_ = MotorState_
-        self._IMUState_ = IMUState_
         dp = DomainParticipant(self.domain_id)
         self._reader = DataReader(dp, Topic(dp, "rt/lowcmd", LowCmd_))
         self._writer = DataWriter(dp, Topic(dp, "rt/lowstate", LowState_))
+        # Pre-allocate the outbound LowState and mutate it in place each step:
+        # rebuilding 35 MotorState_ objects per step (at 500Hz) is enough Python
+        # allocation to push the realtime loop past its 2ms budget.
+        self._state = LowState_(
+            version=[0, 0], mode_pr=0, mode_machine=0, tick=0,
+            imu_state=IMUState_(
+                quaternion=[1.0, 0.0, 0.0, 0.0], gyroscope=[0.0, 0.0, 0.0],
+                accelerometer=[0.0, 0.0, 0.0], rpy=[0.0, 0.0, 0.0], temperature=0,
+            ),
+            motor_state=[
+                MotorState_(
+                    mode=1, q=0.0, dq=0.0, ddq=0.0, tau_est=0.0,
+                    temperature=[0, 0], vol=0.0, sensor=[0, 0],
+                    motorstate=0, reserve=[0, 0, 0, 0],
+                )
+                for _ in range(MOTOR_SLOTS)
+            ],
+            wireless_remote=[0] * 40, reserve=[0, 0, 0, 0], crc=0,
+        )
         print(
             f"DDS active: domain={self.domain_id} interface={self.interface} "
             f"topics=rt/lowcmd,rt/lowstate actuators={self.nu}",
@@ -94,35 +110,22 @@ class G1DdsBridge:
             data.ctrl[i] = mc.kp * (mc.q - q) + mc.kd * (mc.dq - dq) + mc.tau
 
     def publish_state(self, data: Any, tick: int) -> None:
-        """Build and publish LowState (motor q/dq/tau + floating-base IMU)."""
-        motors = []
-        for i in range(MOTOR_SLOTS):
-            if i < self.nu:
-                q = float(data.qpos[self.qadr[i]])
-                dq = float(data.qvel[self.vadr[i]])
-                tau = float(data.actuator_force[i])
-            else:
-                q = dq = tau = 0.0
-            motors.append(
-                self._MotorState_(
-                    mode=1, q=q, dq=dq, ddq=0.0, tau_est=tau,
-                    temperature=[0, 0], vol=0.0, sensor=[0, 0],
-                    motorstate=0, reserve=[0, 0, 0, 0],
-                )
-            )
-        quat = [float(x) for x in data.qpos[3:7]]   # free-base quaternion (w,x,y,z)
-        gyro = [float(x) for x in data.qvel[3:6]]
-        imu = self._IMUState_(
-            quaternion=quat, gyroscope=gyro, accelerometer=[0.0, 0.0, 0.0],
-            rpy=[0.0, 0.0, 0.0], temperature=0,
-        )
-        self._writer.write(
-            self._LowState_(
-                version=[0, 0], mode_pr=0, mode_machine=0, tick=tick & 0xFFFFFFFF,
-                imu_state=imu, motor_state=motors, wireless_remote=[0] * 40,
-                reserve=[0, 0, 0, 0], crc=0,
-            )
-        )
+        """Publish LowState (motor q/dq/tau + floating-base IMU), mutating the
+        pre-allocated message in place to avoid per-step allocation."""
+        qpos = data.qpos
+        qvel = data.qvel
+        force = data.actuator_force
+        motors = self._state.motor_state
+        for i in range(self.nu):
+            m = motors[i]
+            m.q = float(qpos[self.qadr[i]])
+            m.dq = float(qvel[self.vadr[i]])
+            m.tau_est = float(force[i])
+        imu = self._state.imu_state
+        imu.quaternion = [float(x) for x in qpos[3:7]]  # free-base quaternion
+        imu.gyroscope = [float(x) for x in qvel[3:6]]
+        self._state.tick = tick & 0xFFFFFFFF
+        self._writer.write(self._state)
 
     @property
     def have_command(self) -> bool:
