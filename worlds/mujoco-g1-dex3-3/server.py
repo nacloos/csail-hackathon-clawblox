@@ -270,6 +270,11 @@ def main() -> None:
     world = G1DDSWorld(args.scene, args.dds_domain, args.dds_interface)
     world.start()
     app = create_app(world)
+    print(
+        f"HTTP lifecycle on http://{args.host}:{args.port}"
+        " (/api.md, /join, /observe) — robot control is DDS",
+        flush=True,
+    )
     try:
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     finally:
