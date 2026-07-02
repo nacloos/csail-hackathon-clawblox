@@ -22,6 +22,8 @@ import mujoco
 import viser
 from mjviser.scene import ViserMujocoScene
 
+import spectator_render
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -44,7 +46,13 @@ def main() -> None:
         port=args.spectator_port,
         label="MuJoCo spectator",
     )
+    spectator_render.disable_lod(server)  # before the scene is built
     scene = ViserMujocoScene(server, model, num_envs=1)
+    spectator_render.configure_after_scene(server, scene)
+    with server.gui.add_folder("Scene", expand_by_default=False):
+        scene.create_scene_gui()
+    with server.gui.add_folder("Visualization", expand_by_default=False):
+        scene.create_overlay_gui()
     print(
         f"Spectator: http://{args.host}:{server.get_port()}/  "
         f"(watching world http://{args.host}:{args.port})",

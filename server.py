@@ -168,13 +168,13 @@ class LiveSpectator:
         self.token = token or str(uuid4())
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
+        import spectator_render
+
         self.server = viser.ViserServer(host=host, port=port, label="MuJoCo spectator")
         self.port = int(self.server.get_port())
-        self._disable_spectator_lod()
+        spectator_render.disable_lod(self.server)  # before the scene is built
         self.scene = ViserMujocoScene(self.server, sim.model, num_envs=1)
-        self._configure_spectator_lighting()
-        self._enable_fixed_geom_shadows()
-        self._wrap_visual_rebuild_for_fixed_geom_shadows()
+        spectator_render.configure_after_scene(self.server, self.scene)
         self.status = self.server.gui.add_html("")
         with self.server.gui.add_folder("Scene", expand_by_default=False):
             self.scene.create_scene_gui()
@@ -200,58 +200,6 @@ class LiveSpectator:
     @property
     def url(self) -> str:
         return f"http://{self.public_host}:{self.port}/?spectator_token={self.token}"
-
-    def _enable_fixed_geom_shadows(self) -> None:
-        fixed_geom_handles = getattr(self.scene, "_fixed_geom_handles", {})
-        for handle in fixed_geom_handles.values():
-            if hasattr(handle, "cast_shadow"):
-                handle.cast_shadow = True
-            if hasattr(handle, "receive_shadow"):
-                handle.receive_shadow = True
-
-    def _wrap_visual_rebuild_for_fixed_geom_shadows(self) -> None:
-        rebuild_visual_handles = getattr(self.scene, "rebuild_visual_handles", None)
-        if rebuild_visual_handles is None:
-            return
-
-        def rebuild_with_fixed_geom_shadows(*args: Any, **kwargs: Any) -> Any:
-            result = rebuild_visual_handles(*args, **kwargs)
-            self._enable_fixed_geom_shadows()
-            return result
-
-        self.scene.rebuild_visual_handles = rebuild_with_fixed_geom_shadows
-
-    def _configure_spectator_lighting(self) -> None:
-        self.server.scene.configure_default_lights(enabled=False)
-        self.server.scene.configure_environment_map("studio", environment_intensity=0.65)
-        self.server.scene.add_light_ambient("/lights/ambient", color=(255, 255, 255), intensity=0.25)
-        self.server.scene.add_light_hemisphere(
-            "/lights/hemisphere",
-            sky_color=(255, 255, 255),
-            ground_color=(170, 175, 180),
-            intensity=0.6,
-        )
-        self.server.scene.add_light_spot(
-            "/lights/key",
-            color=(255, 248, 235),
-            intensity=5.0,
-            distance=8.0,
-            angle=0.9,
-            penumbra=0.45,
-            decay=1.5,
-            cast_shadow=True,
-            position=(1.4, -2.2, 4.0),
-            direction=(-0.45, 0.55, -1.0),
-        )
-
-    def _disable_spectator_lod(self) -> None:
-        add_batched_meshes_trimesh = self.server.scene.add_batched_meshes_trimesh
-
-        def add_full_detail_batched_meshes_trimesh(*args: Any, **kwargs: Any) -> Any:
-            kwargs["lod"] = "off"
-            return add_batched_meshes_trimesh(*args, **kwargs)
-
-        self.server.scene.add_batched_meshes_trimesh = add_full_detail_batched_meshes_trimesh
 
     def _run(self) -> None:
         delay = 1.0 / max(1.0, self.update_hz)
