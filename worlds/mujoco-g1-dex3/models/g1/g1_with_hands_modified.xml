@@ -12,7 +12,7 @@
         <geom group="2" type="mesh" contype="0" conaffinity="0" density="0" material="metal"/>
       </default>
       <default class="collision">
-        <geom group="3" type="mesh"/>
+        <geom group="3" type="mesh" solref="0.004 1" solimp="0.99 0.995 0.0001 0.5 2"/>
         <default class="foot">
           <geom type="sphere" size="0.005" priority="1" friction="0.6" condim="3"/>
         </default>
@@ -493,12 +493,12 @@
     <motor name="right_wrist_yaw" joint="right_wrist_yaw_joint" ctrlrange="-5 5" />
     
     <position name="left_hand_thumb_0_joint" joint="left_hand_thumb_0_joint" ctrlrange="-1.0472 1.0472" />
-    <position name="left_hand_thumb_1_joint" joint="left_hand_thumb_1_joint" ctrlrange="-1.0472 0.724312" />
-    <position name="left_hand_thumb_2_joint" joint="left_hand_thumb_2_joint" ctrlrange="-1.74533 0" />
-    <position name="left_hand_middle_0_joint" joint="left_hand_middle_0_joint" ctrlrange="0 1.5708" />
-    <position name="left_hand_middle_1_joint" joint="left_hand_middle_1_joint" ctrlrange="0 1.74533" />
-    <position name="left_hand_index_0_joint" joint="left_hand_index_0_joint" ctrlrange="0 1.5708" />
-    <position name="left_hand_index_1_joint" joint="left_hand_index_1_joint" ctrlrange="0 1.5708" />
+    <position name="left_hand_thumb_1_joint" joint="left_hand_thumb_1_joint" ctrlrange="-0.724312 1.0472" />
+    <position name="left_hand_thumb_2_joint" joint="left_hand_thumb_2_joint" ctrlrange="0 1.74533" />
+    <position name="left_hand_middle_0_joint" joint="left_hand_middle_0_joint" ctrlrange="-1.5708 0" />
+    <position name="left_hand_middle_1_joint" joint="left_hand_middle_1_joint" ctrlrange="-1.74533 0" />
+    <position name="left_hand_index_0_joint" joint="left_hand_index_0_joint" ctrlrange="-1.5708 0" />
+    <position name="left_hand_index_1_joint" joint="left_hand_index_1_joint" ctrlrange="-1.74533 0" />
     
     
     <position name="right_hand_thumb_0_joint" joint="right_hand_thumb_0_joint" ctrlrange="-1.0472 1.0472" />
