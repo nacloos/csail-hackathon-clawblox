@@ -24,6 +24,43 @@ WORLD_DDS_DOMAIN_ID    the DDS domain id for your run
 WORLD_DDS_INTERFACE    the network interface the bus binds (e.g. lo)
 ```
 
+### Runtime for DDS control
+
+Run your DDS control scripts with the Python that has CycloneDDS and the
+`unitree_hg` IDL installed:
+
+```text
+/sandbox-deps/envs/unitree-mujoco/bin/python
+```
+
+The default `python3` / `/sandbox-deps/bin/python` has `mujoco` (use it for
+kinematics and model inspection) but **not** CycloneDDS, so `import cyclonedds`
+fails there. `unitree_sdk2py.idl.unitree_hg.msg.dds_` (`LowCmd_`, `LowState_`,
+`MotorCmd_`) is available in the env python above. Read the DDS coordinates from
+the environment (`WORLD_DDS_DOMAIN_ID` / `WORLD_DDS_INTERFACE`) and initialize
+your participant on that domain.
+
+### Discovery config (required)
+
+`lo` is not multicast-capable, so you must configure **unicast discovery** or you
+will never see the world's participant. Set `CYCLONEDDS_URI` before creating any
+participant, to exactly what the world uses:
+
+```xml
+<CycloneDDS><Domain><General>
+  <Interfaces><NetworkInterface name='lo'/></Interfaces>
+  <AllowMulticast>false</AllowMulticast>
+</General><Discovery>
+  <ParticipantIndex>auto</ParticipantIndex>
+  <Peers><Peer address='localhost'/></Peers>
+</Discovery></Domain></CycloneDDS>
+```
+
+(Equivalently, `unitree_sdk2py.core.channel.ChannelFactoryInitialize(domain,
+interface)` sets up compatible loopback discovery for you.) The world and your
+controller run the **same** CycloneDDS (0.10.2) and IDL, so types match — mixing
+CycloneDDS versions crashes DDS type discovery.
+
 Initialize your DDS participant on that domain and interface. Your run has its
 own private network namespace, so the bus is yours alone.
 

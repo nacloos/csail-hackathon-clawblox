@@ -10,10 +10,14 @@ mode = "external"
 [transport]
 type = "dds"
 
+# The world runs in the same self-contained conda env the sandboxed agent uses
+# (/sandbox-deps/envs/unitree-mujoco), so both speak the exact same CycloneDDS
+# (0.10.2) and unitree_hg IDL — a version mismatch otherwise segfaults DDS type
+# discovery. The env carries mujoco + cyclonedds + unitree_sdk2py + fastapi.
 [run]
 command = [
-  "uv", "run", "--project", "../..",
-  "python", "server.py",
+  "bash", "-lc",
+  "conda_base=$(conda info --base) && unset VIRTUAL_ENV && exec \"$conda_base/envs/unitree-mujoco/bin/python\" server.py",
 ]
 
 [replay]

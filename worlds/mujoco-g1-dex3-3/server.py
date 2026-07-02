@@ -139,14 +139,17 @@ class G1DDSWorld:
                 next_step = time.perf_counter()
 
     def _cyclonedds_uri(self) -> str:
-        # Lock discovery to the assigned interface, no multicast beyond it.
-        # Isolation is enforced by the per-run network namespace; this is the
-        # in-namespace transport config.
+        # `lo` is not multicast-capable, so discovery uses unicast peers on
+        # localhost rather than SPDP multicast. Discovery is locked to the
+        # assigned interface; the per-run domain id provides isolation. Agents
+        # must use the same config (see API.md) to interoperate.
         return (
             "<CycloneDDS><Domain><General>"
             f"<Interfaces><NetworkInterface name='{self.interface}'/></Interfaces>"
-            "<AllowMulticast>spdp</AllowMulticast>"
-            "</General></Domain></CycloneDDS>"
+            "<AllowMulticast>false</AllowMulticast></General>"
+            "<Discovery><ParticipantIndex>auto</ParticipantIndex>"
+            "<Peers><Peer address='localhost'/></Peers></Discovery>"
+            "</Domain></CycloneDDS>"
         )
 
     def _apply_control_locked(self) -> None:
