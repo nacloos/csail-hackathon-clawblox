@@ -954,6 +954,18 @@ def create_app(
     def observe(x_session: str | None = Header(default=None)) -> dict[str, Any]:
         return sim.observe(x_session)
 
+    @app.get("/state")
+    def state() -> dict[str, Any]:
+        # Lightweight pose feed for an out-of-process spectator: just the
+        # dynamic state, no per-call model payload. Cheap enough to poll at
+        # frame rate without slowing the sim thread.
+        with sim.lock:
+            return {
+                "time": float(sim.data.time),
+                "tick": sim.tick,
+                "qpos": sim.data.qpos.tolist(),
+            }
+
     @app.post("/input")
     def input_action(action: InputAction, x_session: str | None = Header(default=None)) -> dict[str, Any]:
         if action.type == "SetControl":
