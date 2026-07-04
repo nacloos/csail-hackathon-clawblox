@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import http.client
-import json
 import signal
 import socket
 import threading
@@ -13,6 +12,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import mujoco
+import numpy as np
 import uvicorn
 import viser
 from fastapi import FastAPI
@@ -139,39 +139,39 @@ class MujocoReplayAdapter:
             self._sync_viewer_gui_locked()
 
     def _load_active_ranges(self) -> list[tuple[int, int]]:
-        events_path = self.meta.events_path
-        if not events_path.is_file():
+        ticks = self.reader.h5["preview/tick"]
+        if len(ticks) < 2:
             return []
 
-        action_ticks: list[int] = []
-        with events_path.open("r", encoding="utf-8") as events_file:
-            for line in events_file:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if event.get("type") != "SetControl":
-                    continue
-                tick = event.get("tick")
-                if isinstance(tick, int):
-                    action_ticks.append(min(max(0, tick), self.total_tick))
-
-        if not action_ticks:
+        qpos = self.reader.h5["preview/qpos"][:]
+        active = np.max(np.abs(np.diff(qpos, axis=0)), axis=1) > 1e-4
+        active_frames = np.flatnonzero(active)
+        if len(active_frames) == 0:
             return []
 
-        # Keep a short pre-roll before each control update so the agent tool call
-        # that caused the action can appear before the world starts moving.
         pre_roll_ticks = max(1, round(2.0 * self.tick_rate))
         post_roll_ticks = max(1, round(1.0 * self.tick_rate))
-        merge_gap_ticks = max(1, round(1.0 * self.tick_rate))
+        merge_gap_ticks = max(1, round(2.0 * self.tick_rate))
         ranges: list[tuple[int, int]] = []
 
-        for tick in sorted(set(action_ticks)):
-            start = max(0, tick - pre_roll_ticks)
-            end = min(self.total_tick, tick + post_roll_ticks)
+        min_run_frames = 3
+        start_frame = prev_frame = int(active_frames[0])
+        frame_runs: list[tuple[int, int]] = []
+        for frame in active_frames[1:]:
+            frame = int(frame)
+            if frame == prev_frame + 1:
+                prev_frame = frame
+                continue
+            if prev_frame - start_frame + 1 >= min_run_frames:
+                frame_runs.append((start_frame, prev_frame))
+            start_frame = prev_frame = frame
+        if prev_frame - start_frame + 1 >= min_run_frames:
+            frame_runs.append((start_frame, prev_frame))
+
+        for start_frame, end_frame in frame_runs:
+            start = max(0, int(ticks[start_frame]) - pre_roll_ticks)
+            end_tick_frame = min(end_frame + 1, len(ticks) - 1)
+            end = min(self.total_tick, int(ticks[end_tick_frame]) + post_roll_ticks)
             if ranges and start <= ranges[-1][1] + merge_gap_ticks:
                 ranges[-1] = (ranges[-1][0], max(ranges[-1][1], end))
             else:
