@@ -1,0 +1,49 @@
+name = "MuJoCo G1 (DDS)"
+description = "Free-base Unitree G1 29-DOF model with the original 3-DOF waist, controlled over the Unitree SDK2 DDS interface."
+
+[runtime]
+mode = "external"
+
+# Control transport: the Unitree SDK2 DDS bus (unitree_hg LowCmd_/LowState_).
+# Actuate allocates a per-run domain id (and the sandbox's network facet); the
+# server reads WORLD_DDS_DOMAIN_ID / WORLD_DDS_INTERFACE. See the transport docs.
+[transport]
+type = "dds"
+
+# Uses the full repo server.py (spectator, sessions, snapshot, recording) with
+# its optional DDS control bridge enabled by WORLD_DDS_DOMAIN_ID. It runs in the
+# same self-contained conda env the sandboxed agent uses
+# (/sandbox-deps/envs/g1), so both speak the exact same CycloneDDS
+# (0.10.2) and unitree_hg IDL — a version mismatch otherwise segfaults DDS type
+# discovery. That env carries mujoco + cyclonedds + unitree_sdk2py + fastapi +
+# uvicorn + h5py + viser/mjviser (the spectator).
+[run]
+command = [
+  "bash", "-lc",
+  "conda_base=$(conda info --base) && unset VIRTUAL_ENV && exec \"$conda_base/envs/g1/bin/python\" ../../server.py --scene models/g1/scene_29dof.xml --control-groups single --no-spectator",
+]
+
+# The spectator runs as a sidecar: its own process (and tmux window), so viser's
+# rendering never shares the sim's GIL and the world holds full 500Hz realtime.
+# It reads WORLD_PORT from the shared env and prints its browser URL on start.
+[[run.sidecar]]
+name = "spectator"
+command = [
+  "bash", "-lc",
+  "conda_base=$(conda info --base) && unset VIRTUAL_ENV && exec \"$conda_base/envs/g1/bin/python\" ../../spectate.py --scene models/g1/scene_29dof.xml",
+]
+
+[sandbox]
+deps_root = "/home/naclo/miniforge3"
+
+[replay]
+command = [
+  "uv", "run", "--project", "../..",
+  "python", "../../replay.py",
+  "{recording}",
+  "--port", "{port}",
+]
+
+[agent]
+source_workspace = true
+server_source = "../../server.py"
