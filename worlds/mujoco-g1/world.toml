@@ -1,5 +1,5 @@
-name = "MuJoCo G1 (DDS)"
-description = "Free-base Unitree G1 29-DOF model with the original 3-DOF waist, controlled over the Unitree SDK2 DDS interface."
+name = "MuJoCo G1 Dex3 (DDS)"
+description = "Free-base Unitree G1 29-DOF model with Dex3-1 hands and the original 3-DOF waist, controlled over the Unitree SDK2 DDS interface."
 
 [runtime]
 mode = "external"
@@ -20,7 +20,7 @@ type = "dds"
 [run]
 command = [
   "bash", "-lc",
-  "conda_base=$(conda info --base) && unset VIRTUAL_ENV && exec \"$conda_base/envs/g1/bin/python\" ../../server.py --scene models/g1/scene_29dof.xml --control-groups single --no-spectator",
+  "conda_base=$(conda info --base) && unset VIRTUAL_ENV && exec \"$conda_base/envs/g1/bin/python\" ../../server.py --scene models/g1/scene_dex3.xml --control-groups single --no-spectator",
 ]
 
 # The spectator runs as a sidecar: its own process (and tmux window), so viser's
@@ -30,7 +30,7 @@ command = [
 name = "spectator"
 command = [
   "bash", "-lc",
-  "conda_base=$(conda info --base) && unset VIRTUAL_ENV && exec \"$conda_base/envs/g1/bin/python\" ../../spectate.py --scene models/g1/scene_29dof.xml",
+  "conda_base=$(conda info --base) && unset VIRTUAL_ENV && exec \"$conda_base/envs/g1/bin/python\" ../../spectate.py --scene models/g1/scene_dex3.xml",
 ]
 
 [sandbox]
